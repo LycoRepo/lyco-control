@@ -1,0 +1,6 @@
+[Unit]
+Description=Write container id to name map for the portal
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lyco-container-names

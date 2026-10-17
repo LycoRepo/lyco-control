@@ -1,0 +1,19 @@
+#!/bin/sh
+# 把「容器 ID → 名字」写成一个门户可读的文件。
+# 这样门户要显示 astrbot 这种名字，却不需要 docker 权限。
+set -e
+out=/var/lib/lyco-portal-ceil
+mkdir -p "$out"
+tmp="$out/containers.json.tmp"
+{
+  printf '{'
+  first=1
+  docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | while read -r id name; do
+    [ "$first" = 1 ] || printf ','
+    first=0
+    printf '"%s":"%s"' "$id" "$name"
+  done
+  printf '}'
+} > "$tmp"
+chmod 644 "$tmp"
+mv "$tmp" "$out/containers.json"

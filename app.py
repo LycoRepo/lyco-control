@@ -778,7 +778,7 @@ def main() -> None:
     threading.Thread(target=_sampler, daemon=True).start()
 
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    print("panel-gate on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
+    print("lyco-control on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
     if COOKIE_DOMAIN and not SECURE_COOKIE:
         print("警告：PORTAL_COOKIE_DOMAIN={} 但 PORTAL_SECURE=0 —— 上 HTTPS 后务必改成 1"
               .format(COOKIE_DOMAIN), flush=True)

@@ -1,261 +1,192 @@
-# panel-gate
+# lyco-control
 
-给一台服务器上的几个自托管面板加一个密码门：登录后从卡片进入各面板，由 Python 标准库 HTTP 服务配合 nginx 提供入口。
+给一台机器上的几个自托管面板加一道共用的密码门：登录一次，然后从卡片进各个面板。
 
-## 它做什么，不做什么
+纯 Python 标准库 + 一个反向代理，没有数据库、不需要 Node、也不装任何监控组件。
 
-- 提供单密码登录、卡片入口、服务状态和浏览器内编辑页。
+## 能做什么
 
-- 配置共享 cookie 域，并让各子域通过 nginx 校验会话后，入口密码只需登录一次。
+- **一个密码管所有入口**：登录后签发一个签名 cookie，子域共享，各面板子域由反代做 `auth_request` 校验。
+- **卡片式首页**：每张卡片显示名称、说明、图标，以及服务端探活结果（HTTP 毫秒数或 systemd 状态）。
+- **资源概览**：CPU / 内存 / 磁盘 / 负载，外加最近 6 分钟的 CPU、内存、网络曲线，以及按服务或容器拆分的占用表。
+- **浏览器里改**：标题、卡片增删、密码，都在 `/admin` 里改，不用碰文件。
+- **详情页**：按卡片看 systemd 单元状态、内存占用和日志尾部。
 
-- 不代替面板自身的登录：通过入口后，目标面板仍可能要求账号密码。
+## 不做什么
 
-- 适合单人、单服务器使用，不提供多用户或角色权限。
+- **不代替面板自己的登录**：过了这道门，目标面板仍可能要求它自己的账号密码。
+- **没有多用户**：只有一套密码，没有角色、没有权限分级。
+- **不做代登录**：不会替你把密码填进目标面板。
+- **不长期存指标**：历史只在内存里，进程重启即清空。
 
-## 界面有什么
+## 页面与接口
 
-- `/`：卡片网格，显示名称、说明、图标及服务端探活状态。
+| 路径 | 作用 |
+|---|---|
+| `/` | 首页：卡片、资源条、图表、服务占用表 |
+| `/login`、`/logout` | 登录、退出 |
+| `/setup` | 首次设置密码，必须带 `?t=<token>` |
+| `/admin` | 改标题、卡片、密码 |
+| `/detail?id=<id>` | 单个卡片的 systemd 状态与日志尾 |
+| `/api/status` | 卡片探活结果（JSON，需登录） |
+| `/api/metrics` | 资源采样 + 服务占用（JSON，需登录） |
+| `/auth` | 供反代 `auth_request` 调用的内部端点 |
 
-- `/detail?id=<卡片id>`：查看 systemd 状态、内存占用和日志尾。
+## 它是怎么串起来的
 
-- `/admin`：编辑品牌名、卡片表及密码；三个表单分别 POST 到 `/admin/title`、`/admin/services`、`/admin/password`。
+```
+                 ┌──────────────── 127.0.0.1:7900  门户（登录 / 卡片 / 编辑 / 指标）
+                 │
+浏览器 ── TLS ── 反代 ── panel.example.com  → 门户
+                 │
+                 └─ app1.example.com ─ auth_request ─→ 门户 /auth
+                                     └─ 通过后 ──→ 127.0.0.1:8080  面板本身
+```
 
-- `/login`、`/logout`：登录和退出；`/api/status`：需登录的 JSON 状态接口。
-
-- `/static/*`：CSS 与图标。仓库自带 `icon-32.png`、`icon-192.png`、`icon-512.png`、`icon.ico`、`apple-touch-icon.png`。
-
-- 未放置图标时，回退到按标题首字生成的 SVG 字标；`/favicon.svg` 随标题实时生成。
+门户默认只监听 `127.0.0.1`，对外一律由反代提供 TLS 和子域入口。反向代理必须覆盖写 `X-Client-IP`，应用只认这个头。
 
 ## 快速开始
 
-需要 Python 3.9+、nginx 和 certbot；Python 服务不需要第三方包。以下安装命令适用于使用 apt 的系统，部署命令从仓库根目录执行。先核对 `deploy/panel-gate.service` 中的运行用户和程序路径，确保与示例的 `portal`、`/srv/panel-gate` 一致。
+要求：Linux、Python 3.9+、反代（示例用 nginx）、certbot。以 Debian/Ubuntu 为例：
 
 ```bash
-
-sudo apt-get update
-
 sudo apt-get install -y python3 nginx certbot python3-certbot-nginx
-
-python3 --version
-
-sudo useradd --system --home /srv/panel-gate --shell /usr/sbin/nologin portal
-
-sudo mkdir -p /srv/panel-gate
-
-sudo cp -r app.py service_status.py templates static /srv/panel-gate/
-
-sudo chown -R portal:portal /srv/panel-gate
-
-sudo cp deploy/panel-gate.service /etc/systemd/system/panel-gate.service
-
-sudo systemctl daemon-reload
-
-sudo systemctl edit panel-gate
-
+sudo useradd --system --home /srv/lyco-control --shell /usr/sbin/nologin portal
+sudo mkdir -p /srv/lyco-control
+sudo cp -r app.py metrics.py service_status.py templates static /srv/lyco-control/
+sudo chown -R portal:portal /srv/lyco-control
+sudo cp deploy/lyco-control.service /etc/systemd/system/lyco-control.service
+sudoedit /etc/systemd/system/lyco-control.service     # 改域名、路径、端口
+sudo systemctl daemon-reload && sudo systemctl enable --now lyco-control
 ```
 
-在覆盖配置中加入以下内容。示例启用首次设置 token，避免开放公网后被他人抢先设置密码。
+服务文件里要改的三处：`PORTAL_COOKIE_DOMAIN`（填 `.example.com`）、`PORTAL_SECURE`（上 HTTPS 后改 1）、`WorkingDirectory` 与 `ExecStart` 的路径。
 
-```text
-
-[Service]
-
-WorkingDirectory=/srv/panel-gate
-
-Environment="PORTAL_CONFIG=/srv/panel-gate/portal.json"
-
-Environment="PORTAL_BIND=127.0.0.1"
-
-Environment="PORTAL_PORT=7900"
-
-Environment="PORTAL_COOKIE_DOMAIN=.example.com"
-
-Environment="PORTAL_SECURE=0"
-
-Environment="PORTAL_SETUP_TOKEN=1"
-
-```
+### 反向代理
 
 ```bash
-
-sudo systemctl daemon-reload && sudo systemctl enable --now panel-gate
-
-sudo systemctl status panel-gate --no-pager
-
-```
-
-### nginx 与证书
-
-将 `panel.example.com` 和各面板子域的 DNS 指向服务器，再安装并编辑示例配置。以下使用 nginx 的 `sites-available` / `sites-enabled` 目录布局。
-
-```bash
-
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/panel-gate
-
-sudoedit /etc/nginx/sites-available/panel-gate
-
-sudo ln -s /etc/nginx/sites-available/panel-gate /etc/nginx/sites-enabled/panel-gate
-
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/lyco-control
+sudoedit /etc/nginx/sites-available/lyco-control   # 改 server_name 和 map 里的端口
+sudo ln -s /etc/nginx/sites-available/lyco-control /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
-
 ```
 
-编辑时，每个子域使用独立的 `server` 块：门户请求通过 `proxy_pass` 转到 `http://127.0.0.1:7900`，面板请求转到各自的本机端口。
+要点：
 
-受保护的面板位置使用 `auth_request /_auth`，由内部 `location = /_auth` 把认证子请求转发到门户的 `/auth`；有会话返回 200，否则返回 401，并跳转到门户登录页。
+- 门户自己的 `server` 块整块 `proxy_pass` 到 `http://127.0.0.1:7900`。
+- 每个面板子域用 `auth_request /_auth`，内部 `location = /_auth` 转发到门户的 `/auth`：有会话返回 200，否则 401，前端跳去登录页。
+- 登录页和首次设置页不要加 `auth_request`，否则永远打不开。
+- 转发时必须覆盖写：`proxy_set_header X-Client-IP $remote_addr;`
 
-不要让登录和首次设置页面也要求已有会话。转发给门户时，用 `proxy_set_header X-Client-IP $remote_addr;` 覆盖客户端传入的同名头。
-
-DNS 生效后申请证书；按实际入口增减子域。密码设置和登录应在 HTTPS 就绪后进行。
+### 证书
 
 ```bash
-
 sudo certbot --nginx -d panel.example.com -d app1.example.com -d app2.example.com
-
-sudo systemctl edit panel-gate
-
 ```
 
-将上面的覆盖项 `PORTAL_SECURE=0` 改为 `PORTAL_SECURE=1`，然后重启，使 cookie 带上 `Secure`。
-
-```bash
-
-sudo systemctl daemon-reload && sudo systemctl restart panel-gate
-
-```
+签完把服务文件里的 `PORTAL_SECURE` 改成 `1` 并重启，cookie 才会带 `Secure`。
 
 ## 首次设置密码
 
-密码最短 10 位。首次设置有两种模式：
-
-- 默认 `PORTAL_SETUP_TOKEN=0`：`/setup` 直接可用，谁先访问谁设置。未设置密码前，不要把这个入口交给不可信访问者。
-
-- 设置 `PORTAL_SETUP_TOKEN=1`：必须打开 `/setup?t=<token>` 才能设置；一次性 token 只出现在服务日志中，适合先暴露公网、稍后才设置密码的情况。
-
-上面的部署示例使用第二种模式。读取日志，将其中的 token 用于 `https://panel.example.com/setup?t=<token>`：
+密码至少 10 位。启动时会生成一次性 token 并写进日志：
 
 ```bash
-
-sudo journalctl -u panel-gate --no-pager -n 50
-
+sudo journalctl -u lyco-control --no-pager -n 30
+# 首次使用：打开 /setup?t=<token> 设置密码（设完这条链接即失效）
 ```
 
-设置完成后，一次性 token 失效；此后访问 `/setup` 会重定向到 `/login`。
+打开 `https://panel.example.com/setup?t=<token>` 设置。设完 token 立即作废，之后访问 `/setup` 会重定向到登录页。忘了密码的话，停服务、清掉 `portal.json` 里的 `password_hash` 与 `session_epoch`、再启动，就会重新生成 token。
 
-## 配置项
+## 配置
 
 ### 环境变量
 
-| 变量 | 默认值 | 说明 |
-
+| 变量 | 默认 | 说明 |
 |---|---|---|
-
-| `PORTAL_CONFIG` | `./portal.json` | 配置路径；含密码哈希和会话密钥，文件权限为 600 |
-
+| `PORTAL_CONFIG` | `./portal.json` | 配置文件；含密码哈希和会话密钥，权限 600 |
+| `PORTAL_BIND` | `127.0.0.1` | 监听地址，默认只给本机反代用 |
 | `PORTAL_PORT` | `7900` | 监听端口 |
+| `PORTAL_TITLE` | `Server Panel` | 初始标题；在 `/admin` 改过之后以配置为准 |
+| `PORTAL_COOKIE_DOMAIN` | 空 | 填 `.example.com` 让子域共用一次登录 |
+| `PORTAL_SECURE` | `0` | HTTPS 就绪后设 1，cookie 加 `Secure` |
+| `PORTAL_SESSION_HOURS` | `8` | 登录有效期（小时） |
+| `PORTAL_LOGIN_LOG` | 空 | 登录审计日志路径；记录成功/失败、IP、时间，超 1 MB 自动轮转 |
 
-| `PORTAL_BIND` | `127.0.0.1` | 监听地址；默认仅本机，由 nginx 对外提供访问 |
+### `portal.json` 里的卡片
 
-| `PORTAL_TITLE` | `Server Panel` | 初始标题；在 `/admin` 修改后以配置为准 |
-
-| `PORTAL_COOKIE_DOMAIN` | 空 | 如 `.example.com`，用于子域共享登录 |
-
-| `PORTAL_SECURE` | `0` | HTTPS 就绪后设为 1，为 cookie 添加 `Secure` |
-
-| `PORTAL_SETUP_TOKEN` | `0` | 设为 1 时，首次设置必须带 `?t=<token>` |
-
-| `PORTAL_LOGIN_LOG` | 空 | 登录审计日志路径，记录成功或失败、IP、时间；超过 1 MB 自动轮转 |
-
-### `portal.json` 卡片字段
-
-卡片位于 `services[]`。以下仅展示卡片配置，不要用它覆盖包含密码哈希和会话密钥的完整配置。
+卡片在 `services[]` 里。只改这个数组，不要整份覆盖——同一个文件还存着密码哈希、会话密钥和设置 token。
 
 ```json
-
 {"services": [{
-
-  "id": "app1", "name": "应用面板", "desc": "查看和管理应用",
-
-  "url": "https://app1.example.com", "check": "http://127.0.0.1:8080/",
-
-  "unit": "app1.service", "log": "/srv/panel-gate/logs/app1.log",
-
-  "icon": "A", "enabled": true
-
+  "id": "app1",
+  "name": "应用面板",
+  "desc": "查看和管理应用",
+  "url": "https://app1.example.com",
+  "check": "http://127.0.0.1:8080/",
+  "unit": "app1.service",
+  "log": "/srv/app1/logs/app1.log",
+  "icon": "A",
+  "enabled": true
 }]}
-
 ```
 
 | 字段 | 说明 |
-
 |---|---|
-
-| `id` | 稳定标识，用于 `/detail?id=`，不是卡片名称 |
-
-| `name` | 卡片名称 |
-
+| `id` | 稳定标识，供 `/detail?id=` 使用，与显示名称无关 |
+| `name` | 卡片标题 |
 | `desc` | 一行说明 |
-
-| `url` | 点击地址，也可使用站内路径，如 `/detail?id=app1` |
-
-| `check` | 服务端 HTTP 探活地址；有值时发起 HTTP 请求，可显示毫秒 |
-
-| `unit` | systemd 单元名；`check` 为空时，按单元状态判断在线，不显示毫秒 |
-
+| `url` | 点击地址，也可写站内路径，如 `/detail?id=app1` |
+| `check` | 探活用的 HTTP 地址；有值就发请求，能显示毫秒 |
+| `unit` | systemd 单元名；`check` 为空时按它判断在线，但不显示毫秒 |
 | `log` | 日志文件路径，详情页显示尾部 |
+| `icon` | 可选，一个字符或 emoji；不填则用名称首字生成字标 |
+| `enabled` | 是否显示 |
 
-| `icon` | 可选，一个字符或 emoji |
+探活优先级：有 `check` 走 HTTP → 没有 `check` 但有 `unit` 走 systemd → 两者都空则状态未知。
 
-| `enabled` | 是否显示卡片 |
+## 资源指标
 
-探活优先级：有 `check` 用 HTTP；没有 `check` 但有 `unit` 用 systemd；两者都空时状态为未知。
+`metrics.py` 只读 `/proc`、`statvfs` 和 cgroup v2，不装 agent。页面每 3 秒拉一次 `/api/metrics`，历史保留 120 个点（约 6 分钟）。
 
-## 安全说明
+返回内容：CPU 与内存百分比、磁盘用量、load、uptime、上下行速率，以及 `services[]`（按 cgroup 统计每个服务或容器的内存与 CPU，按内存降序）。
 
-- 密码使用 PBKDF2-HMAC-SHA256、200,000 轮及独立 salt，不存明文密码。
+**容器名字（可选）**：cgroup 目录名是容器 ID，为了让表格显示 `astrbot` 这种名字，需要一个 root 定时器把 ID→名字写成一个文件给门户读——门户本身不拿 docker 权限：
 
-- 会话为 HMAC 签名的时间戳 cookie，有效期 14 天，带 `HttpOnly` 和 `SameSite=Lax`；HTTPS 下需启用 `Secure`。
+```bash
+sudo cp deploy/lyco-container-names /usr/local/bin/ && sudo chmod +x /usr/local/bin/lyco-container-names
+sudo mkdir -p /var/lib/lyco-portal-ceil
+sudo cp deploy/lyco-container-names.service deploy/lyco-container-names.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now lyco-container-names.timer
+```
 
-- 签名绑定 `session_epoch`，修改或重设密码后，旧 cookie 立即失效。
+没有这个定时器也没关系：卡片和系统服务照常统计，只是 docker 容器会显示成一段 ID。
 
-- 单 IP 连续失败 5 次起指数退避，1 分钟起、封顶 1 小时，响应带 `Retry-After`；IPv6 按 /64 归并。
+## 安全上做了哪些事
 
-- 10 分钟内全局失败 30 次进入 2 秒慢速模式，不整体封禁；登录校验最多同时运行 2 个。
-
-- 客户端 IP 只认 nginx 覆盖写入的 `X-Client-IP`，不信任 `X-Forwarded-For`；不要让外部请求绕过反代直连服务。
-
-- POST 做 same-origin 校验以防 CSRF，请求体上限 256 KB，超出返回 413。
-
-- 卡片字段做 HTML 转义；登录后的 `next` 只接受站内路径，丢弃 `//evil.example` 这类开放重定向。
-
-- 配置写入串行化，通过临时文件、fsync 和 rename 原子替换，权限为 600；该文件含会话密钥，应限制读取权限。
-
-- 共享 cookie 只应覆盖你信任的子域。密码门不替代 HTTPS，也不替代各面板自己的认证。
+- 密码存 PBKDF2-HMAC-SHA256、200,000 轮、独立 salt，不存明文。
+- 会话是 HMAC 签名的时间戳 cookie，`HttpOnly` + `SameSite=Lax`，HTTPS 下加 `Secure`；签名绑定 `session_epoch`，改密码即让所有旧 cookie 失效。
+- 单 IP 连错 5 次开始指数退避（1 分钟起、封顶 1 小时，带 `Retry-After`）；IPv6 按 /64 归并。
+- 10 分钟内全局失败 30 次进入 2 秒慢速模式；登录校验最多并发 2 个。
+- 客户端 IP 只认反代覆盖写入的 `X-Client-IP`，不信任客户端自带的 `X-Forwarded-For`。
+- POST 校验 same-origin 防 CSRF；请求体上限 256 KB，超出 413。
+- 卡片字段做 HTML 转义；登录后的 `next` 只接受站内路径，`//evil.example` 这类会被丢弃。
+- 配置写入串行化，临时文件 + fsync + rename 原子替换，权限 600。
 
 ## 目录结构
 
-```text
-
-app.py                    单文件服务：路由、认证、探活、渲染
-
-service_status.py         systemd 状态与日志尾：只读，调用 systemctl/journalctl
-
-templates/                index、login、setup、admin、detail
-
-static/                   style.css 与图标
-
-deploy/                   panel-gate.service、nginx.conf
-
+```
+app.py                HTTP 服务：路由、认证、渲染
+metrics.py            /proc、statvfs、cgroup 采样
+service_status.py     systemd 状态与日志尾（只读）
+templates/            index、login、setup、admin、detail
+static/               style.css 与站点图标
+deploy/               systemd 单元、nginx 示例、容器名定时器
 ```
 
 ## 已知限制
 
-- 不做卡片背后面板的代登录，目标面板仍可能要求自己的账号密码。
-
-- 没有多用户和角色权限，只有一套密码；没有数据库，配置保存在单个 JSON 文件中。
-
-- 探活仅支持 HTTP 和 systemd；`unit` 模式无法提供响应时间。
-
-- 需要 nginx 或同类反代提供 HTTPS 与子域入口；服务默认只监听 `127.0.0.1`。
-
-- 不支持集群或多副本，状态保存在内存与单个 JSON 文件中。
+- 目标面板仍可能要自己的账号密码；这里只统一了「进得去」这一层。
+- 单用户、单机；配置是一个 JSON 文件，不支持集群或多副本。
+- 探活只有 HTTP 和 systemd 两种；systemd 模式给不出响应时间。
+- 指标历史在内存里，重启即清空；不做告警，也没有长期存储。
+- TLS 和子域入口依赖外部反代，服务本身只说 HTTP。
