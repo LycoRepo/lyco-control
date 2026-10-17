@@ -42,7 +42,8 @@ BIND = os.environ.get("PORTAL_BIND", "127.0.0.1")
 COOKIE = "panel_gate"
 COOKIE_DOMAIN = os.environ.get("PORTAL_COOKIE_DOMAIN", "")   # 例如 .example.com
 SECURE_COOKIE = os.environ.get("PORTAL_SECURE", "0") == "1"
-SESSION_DAYS = 14
+SESSION_HOURS = int(os.environ.get("PORTAL_SESSION_HOURS", "8"))   # 登录有效期（小时）
+SESSION_SECONDS = SESSION_HOURS * 3600
 PBKDF2_ITERS = 200_000
 MIN_PASSWORD = 10              # 密码最短长度
 MAX_BODY = 256 * 1024          # 表单就几百字节，给足余量但不让人塞爆内存
@@ -153,7 +154,7 @@ def _sign(secret: str, payload: str) -> str:
 
 
 def make_session(secret: str, epoch: str) -> str:
-    exp = int(time.time()) + SESSION_DAYS * 86400
+    exp = int(time.time()) + SESSION_SECONDS
     return "{}.{}".format(exp, _sign(secret, "{}.{}".format(exp, epoch)))
 
 
@@ -484,7 +485,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.cfg["session_epoch"] = secrets_token()
                 save_config(self.cfg)
             return self._redirect("/", extra=["Set-Cookie: " + self._cookie_header(
-                make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_DAYS * 86400)])
+                make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_SECONDS)])
         if path == "/login":
             blocked, wait = self._login_blocked()
             if blocked:
@@ -503,7 +504,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not safe_next(target):
                     target = "/"
                 return self._redirect(target, extra=["Set-Cookie: " + self._cookie_header(
-                    make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_DAYS * 86400)])
+                    make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_SECONDS)])
             time.sleep(0.4)
             return self._send(self.render("login.html", error_block=card_msg("密码不对", "err"),
                                      next=quote(form.get("next", "/"))), 401)
@@ -729,7 +730,7 @@ class Handler(BaseHTTPRequestHandler):
                                  msg_block=card_msg("密码已更新（其它设备需要重新登录）", "ok"), path=CFG_PATH),
                           extra=["Set-Cookie: " + self._cookie_header(
                               make_session(self.cfg["secret"], self.cfg["session_epoch"]),
-                              SESSION_DAYS * 86400)])
+                              SESSION_SECONDS)])
 
     def log_message(self, fmt, *args):
         pass
