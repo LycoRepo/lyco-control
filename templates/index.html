@@ -16,7 +16,7 @@
     <div class="brand"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></div>
     <nav class="topnav" aria-label="主导航">
       <a class="navlink" href="/admin">打开设置</a>
-      <a class="navlink" href="/logout">退出登录</a>
+      <form method="post" action="/logout" class="navform"><button type="submit" class="navlink">退出登录</button></form>
     </nav>
   </div>
 </header>
@@ -154,7 +154,7 @@ $stats_strip
       if (!r.ok) return;
       const d = await r.json();
 
-      $('stamp').textContent = '已运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString();
+      $('stamp').textContent = '已运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString() + (d.degraded ? ' · 数据可能延迟' : '');
 
       const hist = Array.isArray(d.history) ? d.history : [];
       const n = hist.length;

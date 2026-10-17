@@ -27,9 +27,11 @@ PERSIST_FILE = os.path.expanduser(os.environ.get("PORTAL_METRICS_FILE", "") or
 PERSIST_EVERY = 60.0
 _last_save = 0.0
 _last_cpu: tuple[int, int] | None = None   # (busy, total)
-_last_net: tuple[float, int, int] | None = None  # (ts, rx, tx)
+_last_net: tuple[float, int, int] | None = None  # (monotonic, rx, tx)
 _last_sample_ts = 0.0
 _latest: dict | None = None
+_last_ok = 0.0
+_last_error: str | None = None
 
 history: deque[dict] = deque(maxlen=HISTORY_LEN)
 _lock = threading.Lock()          # 保护 history / _prev_cg / _latest_services
@@ -61,7 +63,9 @@ def _net_bytes() -> tuple[int, int]:
     rx = tx = 0
     for line in _read("/proc/net/dev").splitlines()[2:]:
         iface, _, data = line.partition(":")
-        if iface.strip() == "lo":
+        name = iface.strip()
+        # 排除回环和容器/网桥虚拟接口：流量经过 veth、docker0 会被重复计一遍
+        if name == "lo" or name.startswith(("veth", "docker", "br-", "virbr")):
             continue
         cols = data.split()
         rx += int(cols[0])
@@ -98,12 +102,16 @@ def sample() -> dict:
 
     rx, tx = _net_bytes()
     rx_kbs = tx_kbs = 0.0
+    mono = time.monotonic()
     if _last_net is not None:
-        dt = now - _last_net[0]
+        dt = mono - _last_net[0]
+        # 网卡重建/计数器回绕会让 rx 变小，这时只重置基线，不报负数
+        if rx < _last_net[1] or tx < _last_net[2]:
+            dt = 0.0
         if dt > 0.5:
             rx_kbs = (rx - _last_net[1]) / 1024.0 / dt
             tx_kbs = (tx - _last_net[2]) / 1024.0 / dt
-    _last_net = (now, rx, tx)
+    _last_net = (mono, rx, tx)
 
     load1, load5, load15 = os.getloadavg()
     uptime_s = float(_read("/proc/uptime").split()[0])
@@ -153,7 +161,10 @@ def sample() -> dict:
         },
         "history": _history_snapshot(),
     }
+    global _last_ok, _last_error
     _latest = result
+    _last_ok = now
+    _last_error = None
     return result
 
 
@@ -163,11 +174,12 @@ _sampler_started = False
 
 def _sampler_loop() -> None:
     while True:
+        global _last_error
         try:
             sample()
             services()          # cgroup 基线也走固定节奏，多客户端不会互相干扰
-        except Exception:
-            pass
+        except Exception as exc:
+            _last_error = "{}: {}".format(type(exc).__name__, str(exc)[:120])
         time.sleep(SAMPLER_INTERVAL)
 
 
@@ -282,14 +294,19 @@ def last() -> dict:
     """取最近一次采样结果；还没采过就现采一次。不推进历史（页面渲染用）。"""
     if _latest is None:
         return sample()
-    return _latest
+    data = dict(_latest)
+    age = time.time() - _last_ok if _last_ok else None
+    data["degraded"] = bool(_last_error) or (age is not None and age > 15)
+    if _last_error:
+        data["error"] = _last_error
+    return data
 
 
 # ---------- 按服务/容器拆分（cgroup v2） ----------
 
 CGROUP_ROOT = "/sys/fs/cgroup/system.slice"
 NAMES_PATH = "/var/lib/lyco-portal-ceil/containers.json"   # 由 lyco-container-names.timer 生成
-_prev_cg: dict[str, tuple[float, int]] = {}
+_prev_cg: dict[str, tuple[float, int]] = {}   # (monotonic, usage_usec)
 _latest_services: list[dict] = []      # 采样线程刷新，请求只读这份
 
 
@@ -333,7 +350,7 @@ def services(limit: int = 8) -> list[dict]:
     CPU 是两次调用的差值，所以第一次调用会全是 0（页面每 3 秒调一次，很快就正常）。
     """
     names = _container_names()
-    now = time.time()
+    now = time.monotonic()
     cores = os.cpu_count() or 1
     try:
         entries = os.listdir(CGROUP_ROOT)
@@ -366,8 +383,11 @@ def services(limit: int = 8) -> list[dict]:
         cpu_pct = 0.0
         if prev is not None:
             dt = now - prev[0]
+            delta = usec - prev[1]
+            if delta < 0:                     # 容器重建，计数器归零
+                dt, delta = 0.0, 0
             if dt > 0.2:
-                cpu_pct = max(0.0, (usec - prev[1]) / 1e6 / dt / cores * 100.0)
+                cpu_pct = max(0.0, delta / 1e6 / dt / cores * 100.0)
         _prev_cg[entry] = (now, usec)
 
         mem_mb = round(mem / 1048576.0, 1)

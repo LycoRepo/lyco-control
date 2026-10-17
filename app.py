@@ -61,7 +61,8 @@ GLOBAL_SLOW_UNTIL = 0.0
 GLOBAL_FAILS: list[float] = []         # 失败时间戳（滑动窗口）
 GLOBAL_UNTIL = 0.0
 LOGIN_LOG = os.environ.get("PORTAL_LOGIN_LOG", "")   # 审计日志，空则只写 stdout
-LOGIN_SEM = threading.Semaphore(2)     # 同时最多处理 2 个登录请求
+LOGIN_SEM = threading.Semaphore(2)
+AUDIT_LOCK = threading.Lock()     # 同时最多处理 2 个登录请求
 TITLE = os.environ.get("PORTAL_TITLE", "服务入口")
 
 DEFAULT_CONFIG = {
@@ -124,6 +125,14 @@ def save_config(cfg: dict) -> None:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, CFG_PATH)
+    try:                                   # 让目录项也落盘，掉电后不会回到旧文件
+        dfd = os.open(os.path.dirname(os.path.abspath(CFG_PATH)) or ".", os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except (OSError, AttributeError):
+        pass
     try:
         os.chmod(CFG_PATH, 0o600)
     except OSError:
@@ -421,9 +430,14 @@ class Handler(BaseHTTPRequestHandler):
         parts = ["{}={}".format(COOKIE, value), "Path=/", "HttpOnly", "SameSite=Lax", "Max-Age={}".format(max_age)]
         if COOKIE_DOMAIN:
             parts.append("Domain=" + COOKIE_DOMAIN)
-        if SECURE_COOKIE:
+        if SECURE_COOKIE or self._is_https():
             parts.append("Secure")
         return "; ".join(parts)
+
+    def _is_https(self) -> bool:
+        """反代在 X-Forwarded-Proto 里说 https 就算 https：忘了设 PORTAL_SECURE 也不会漏掉 Secure。"""
+        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        return proto == "https"
 
     def _send(self, body: bytes, code: int = 200, ctype: str = "text/html; charset=utf-8", extra: list[str] | None = None):
         self.send_response(code)
@@ -482,7 +496,9 @@ class Handler(BaseHTTPRequestHandler):
             note = card_msg("请求频繁，请稍后重试", "err") if slow else ""
             return self._send(self.render("login.html", error_block=note, next=quote(self._next())))
         if path == "/logout":
-            return self._redirect("/login", extra=["Set-Cookie: " + self._cookie_header("", 0)])
+            # 登出改成 POST：GET 会被外站用一张图片或链接触发（SameSite=Lax 拦不住顶层导航）
+            return self._send(b"<h1>405</h1><p>\xe8\xaf\xb7\xe7\x94\xa8\xe9\xa1\xb5\xe9\x9d\xa2\xe4\xb8\x8a\xe7\x9a\x84\xe9\x80\x80\xe5\x87\xba\xe6\x8c\x89\xe9\x92\xae</p>", 405,
+                              extra=["Allow: POST"])
         if not self._logged_in():
             return self._redirect("/login?next=" + quote(self.path))
         if path == "/":
@@ -538,6 +554,8 @@ class Handler(BaseHTTPRequestHandler):
                               extra=["Connection: close"])
         if not self._same_origin():
             return self._send(b"\xe4\xb8\x8d\xe5\x85\x81\xe8\xae\xb8\xe8\xb7\xa8\xe7\xab\x99\xe6\x8f\x90\xe4\xba\xa4", 403, "text/plain")
+        if path == "/logout":
+            return self._redirect("/login", extra=["Set-Cookie: " + self._cookie_header("", 0)])
         if path == "/setup":
             if self.cfg.get("password_hash"):
                 return self._redirect("/login")
@@ -551,11 +569,15 @@ class Handler(BaseHTTPRequestHandler):
             if pw != form.get("confirm", ""):
                 return self._send(self.render("setup.html", error_block=card_msg("两次输入的密码不一致", "err"),
                                          setup_token=self.cfg.get("setup_token", "")), 400)
-            with CFG_LOCK:
-                self.cfg["password_hash"] = hash_password(pw)
-                self.cfg["setup_token"] = ""
-                self.cfg["session_epoch"] = secrets_token()
-                save_config(self.cfg)
+            def _apply(cfg):
+                cfg["password_hash"] = hash_password(pw)
+                cfg["setup_token"] = ""
+                cfg["session_epoch"] = secrets_token()
+            err = self._commit(_apply)
+            if err:
+                return self._send(self.render("setup.html",
+                                         error_block=card_msg(err, "err"),
+                                         setup_token=self.cfg.get("setup_token", "")), 500)
             return self._redirect("/", extra=["Set-Cookie: " + self._cookie_header(
                 make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_SECONDS)])
         if path == "/login":
@@ -568,9 +590,31 @@ class Handler(BaseHTTPRequestHandler):
             if self._global_slow():
                 time.sleep(2)      # 全局降速：只让人变慢，绝不把所有人挡在门外
             pw = form.get("password", "")
-            with LOGIN_SEM:        # 最多 2 个并发校验，避免拿线程和 CPU 打满
-                ok = verify_password(pw, self.cfg.get("password_hash", ""))
+            # 排队也要有上限：否则大量并发请求会堆在这里等着算哈希
+            if not LOGIN_SEM.acquire(timeout=5):
+                return self._send(self.render("login.html",
+                                         error_block=card_msg("请求频繁，请稍后重试", "err"),
+                                         next=quote(form.get("next", "/"))), 503,
+                                  extra=["Retry-After: 5"])
+            try:
+                blocked, wait = self._login_blocked()      # 排队期间可能已经被封
+                if blocked:
+                    return self._send(self.render("login.html",
+                                             error_block=card_msg("尝试过多，请在 {} 秒后重试".format(wait), "err"),
+                                             next=quote(form.get("next", "/"))), 429,
+                                      extra=["Retry-After: {}".format(max(wait, 1))])
+                snap_hash = self.cfg.get("password_hash", "")
+                snap_epoch = self.cfg.get("session_epoch", "")
+                ok = verify_password(pw, snap_hash)
+                epoch_now = self.cfg.get("session_epoch", "")
+            finally:
+                LOGIN_SEM.release()
             self._note_login(ok)
+            if ok and epoch_now != snap_epoch:
+                # 校验期间密码被改过：这次通过作废，按失败处理，别拿新 epoch 发旧凭证
+                return self._send(self.render("login.html",
+                                         error_block=card_msg("密码已更新，请重新登录", "err"),
+                                         next=quote(form.get("next", "/"))), 401)
             if ok:
                 target = form.get("next") or "/"
                 if not safe_next(target):
@@ -585,9 +629,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/admin/title":
             name = (form.get("title") or "").strip()[:40]
             if name:
-                with CFG_LOCK:
-                    self.cfg["title"] = name
-                    save_config(self.cfg)
+                err = self._commit(lambda cfg: cfg.__setitem__("title", name))
+                if err:
+                    return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
+                                             msg_block=card_msg(err, "err"), path=CFG_PATH,
+                                             metrics_block=metrics_block_html(self.cfg)), 500)
             return self._redirect("/admin")
         if path == "/admin/services":
             return self._save_services(form)
@@ -598,12 +644,16 @@ class Handler(BaseHTTPRequestHandler):
                 hours = 24
             hours = max(1, min(168, hours))
             short = (form.get("short") or "") not in ("", "0", "off", "false")
-            with CFG_LOCK:
-                self.cfg.setdefault("metrics", {})
-                self.cfg["metrics"].pop("persist", None)     # 旧版本留下的键，已不用
-                self.cfg["metrics"]["hours"] = hours
-                self.cfg["metrics"]["short"] = short
-                save_config(self.cfg)
+            def _apply(cfg):
+                mx = cfg.setdefault("metrics", {})
+                mx.pop("persist", None)                      # 旧版本留下的键，已不用
+                mx["hours"] = hours
+                mx["short"] = short
+            err = self._commit(_apply)
+            if err:
+                return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
+                                         msg_block=card_msg(err, "err"), path=CFG_PATH,
+                                         metrics_block=metrics_block_html(self.cfg)), 500)
             metrics.configure(hours=hours, short=short)
             return self._redirect("/admin")
         if path == "/admin/password":
@@ -686,10 +736,11 @@ class Handler(BaseHTTPRequestHandler):
         line = '{} {} {}\n'.format(time.strftime("%Y-%m-%d %H:%M:%S"), "OK  " if ok else "FAIL", safe_ip)
         if LOGIN_LOG:
             try:
-                if os.path.exists(LOGIN_LOG) and os.path.getsize(LOGIN_LOG) > 1024 * 1024:
-                    os.replace(LOGIN_LOG, LOGIN_LOG + ".1")     # 超过 1MB 轮转一次
-                with io.open(LOGIN_LOG, "a", encoding="utf-8") as fh:
-                    fh.write(line)
+                with AUDIT_LOCK:      # 并发登录撞上轮转会把刚保留的 .1 覆盖掉
+                    if os.path.exists(LOGIN_LOG) and os.path.getsize(LOGIN_LOG) > 1024 * 1024:
+                        os.replace(LOGIN_LOG, LOGIN_LOG + ".1")
+                    with io.open(LOGIN_LOG, "a", encoding="utf-8") as fh:
+                        fh.write(line)
                 return
             except Exception as exc:
                 print("audit write failed: {} | {}".format(type(exc).__name__, line.strip()), flush=True)
@@ -704,18 +755,24 @@ class Handler(BaseHTTPRequestHandler):
         """
         ref = self.headers.get("Origin") or self.headers.get("Referer") or ""
         if not ref:
-            return True
+            return True            # curl/脚本没有这个头；浏览器一定会带
         try:
-            host = urlparse(ref).netloc.lower()
-            return host == (self.headers.get("Host", "") or "").lower()
+            origin = urlparse(ref)
+            host = (self.headers.get("Host", "") or "").lower()
+            if origin.netloc.lower() != host:
+                return False
+            # 协议不同也算跨源（防止 https 页面被 http 提交）
+            want = "https" if self._is_https() else "http"
+            return (origin.scheme or want).lower() == want
         except Exception:
             return False
 
     def render(self, template: str, **ctx) -> bytes:
         """模板渲染：标题优先用配置里改过的名字，没改过才用环境变量。"""
         title = self.cfg.get("title") or TITLE
+        # 标题是用户可改的自由文本：这里只给原文，转义统一在模板渲染时做（否则会转两次）
         ctx.setdefault("title", title)
-        ctx.setdefault("title_attr", html_mod.escape(title))   # 放进 value="..." 时要转义
+        ctx.setdefault("title_attr", title)
         ctx.setdefault("brand_mark", html_mod.escape(brand_mark(title)))
         return render(template, **ctx)
 
@@ -795,11 +852,30 @@ class Handler(BaseHTTPRequestHandler):
                 "log": form.get("log_{}".format(i), "").strip(),
                 "enabled": form.get("enabled_{}".format(i)) == "on",
             })
-        with CFG_LOCK:
-            self.cfg["services"] = services
-            save_config(self.cfg)
+        err = self._commit(lambda cfg: cfg.__setitem__("services", services))
+        if err:
+            return self._send(self.render("admin.html", rows=admin_rows(services),
+                                     msg_block=card_msg(err, "err"), path=CFG_PATH,
+                                     metrics_block=metrics_block_html(self.cfg)), 500)
         return self._send(self.render("admin.html", rows=admin_rows(services),
                                  msg_block=card_msg("卡片设置已保存", "ok"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)))
+
+    def _commit(self, mutate) -> str | None:
+        """改配置：先在副本上改、成功写盘，再发布到运行态。
+
+        之前是「先改内存再写盘」，写盘失败时运行中的密码/配置已经变了，重启又退回旧值，
+        旧密码会在重启后重新可用。
+        """
+        with CFG_LOCK:
+            new_cfg = copy.deepcopy(self.cfg)
+            mutate(new_cfg)
+            try:
+                save_config(new_cfg)
+            except Exception as exc:
+                return "保存配置失败：{}".format(type(exc).__name__)
+            self.cfg.clear()
+            self.cfg.update(new_cfg)
+        return None
 
     def _save_password(self, form: dict):
         old = form.get("old", "")
@@ -814,10 +890,14 @@ class Handler(BaseHTTPRequestHandler):
         if new != form.get("confirm", ""):
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                      msg_block=card_msg("两次输入的密码不一致", "err"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)), 400)
-        with CFG_LOCK:
-            self.cfg["password_hash"] = hash_password(new)
-            self.cfg["session_epoch"] = secrets_token()   # 其它设备上的旧 cookie 立即失效
-            save_config(self.cfg)
+        def _apply(cfg):
+            cfg["password_hash"] = hash_password(new)
+            cfg["session_epoch"] = secrets_token()        # 其它设备上的旧 cookie 立即失效
+        err = self._commit(_apply)
+        if err:
+            return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
+                                     msg_block=card_msg(err, "err"), path=CFG_PATH,
+                                     metrics_block=metrics_block_html(self.cfg)), 500)
         return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                  msg_block=card_msg("密码已更新，其他设备需重新登录", "ok"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)),
                           extra=["Set-Cookie: " + self._cookie_header(

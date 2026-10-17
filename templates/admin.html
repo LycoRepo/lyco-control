@@ -16,7 +16,7 @@
     <div class="brand"><a class="brand-link" href="/"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></a></div>
     <nav class="topnav" aria-label="主导航">
       <a class="navlink" href="/">返回首页</a>
-      <a class="navlink" href="/logout">退出登录</a>
+      <form method="post" action="/logout" class="navform"><button type="submit" class="navlink">退出登录</button></form>
     </nav>
   </div>
 </header>
