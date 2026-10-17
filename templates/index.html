@@ -15,16 +15,16 @@
   <div class="bar-inner">
     <div class="brand"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></div>
     <nav class="topnav" aria-label="主导航">
-      <a class="navlink" href="/admin">编辑</a>
-      <a class="navlink" href="/logout">退出</a>
+      <a class="navlink" href="/admin">打开设置</a>
+      <a class="navlink" href="/logout">退出登录</a>
     </nav>
   </div>
 </header>
 
 <main class="wrap">
   <section class="hero" aria-labelledby="page-title">
-    <p class="hero-kicker">私人控制台</p>
-    <h1 class="hero-title" id="page-title">服务器入口</h1>
+    <p class="hero-kicker">服务门户</p>
+    <h1 class="hero-title" id="page-title">服务入口</h1>
   </section>
 
   <section class="grid" aria-label="服务入口">
@@ -36,22 +36,22 @@ $stats_strip
 
   <section class="panel" aria-labelledby="chart-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="chart-title">资源趋势</h2>
+      <h2 class="panel-title" id="chart-title">指标趋势</h2>
       <p class="panel-hint"><span id="span">最近 6 分钟</span> · <span id="stamp">—</span></p>
     </div>
     <div class="chart-row three">
       <div class="chart-box">
-        <p class="chart-title">CPU（%）</p>
+        <p class="chart-title">CPU 使用率（%）</p>
         <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-1">—</span><span id="y-mid-1">—</span><span id="y-bot-1">0</span></div><canvas id="c-cpu" height="120"></canvas></div>
         <p class="chart-axis"><span id="ax-left-1">—</span><span id="ax-mid-1">—</span><span id="ax-right-1">现在</span></p>
       </div>
       <div class="chart-box">
-        <p class="chart-title">内存（%）</p>
+        <p class="chart-title">内存使用率（%）</p>
         <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-2">—</span><span id="y-mid-2">—</span><span id="y-bot-2">0</span></div><canvas id="c-mem" height="120"></canvas></div>
         <p class="chart-axis"><span id="ax-left-2">—</span><span id="ax-mid-2">—</span><span id="ax-right-2">现在</span></p>
       </div>
       <div class="chart-box">
-        <p class="chart-title">网络（KB/s）</p>
+        <p class="chart-title">网络速率（KB/s）</p>
         <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-3">—</span><span id="y-mid-3">—</span><span id="y-bot-3">0</span></div><canvas id="c-net" height="120"></canvas></div>
         <p class="chart-axis"><span id="ax-left-3">—</span><span id="ax-mid-3">—</span><span id="ax-right-3">现在</span></p>
         <p class="chart-legend"><span class="lg lg-rx"></span>下行 <span class="lg lg-tx"></span>上行</p>
@@ -61,19 +61,19 @@ $stats_strip
 
   <section class="panel" aria-labelledby="svc-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="svc-title">服务占用</h2>
-      <p class="panel-hint">按内存排序 · 容器与服务都在内</p>
+      <h2 class="panel-title" id="svc-title">服务资源占用</h2>
+      <p class="panel-hint">包含服务和容器，按内存占用排序。</p>
     </div>
-    <div class="table-scroll" tabindex="0" role="region" aria-label="服务占用表格">
+    <div class="table-scroll" tabindex="0" role="region" aria-label="服务资源占用表格">
       <table class="table svc-table">
-        <caption class="sr-only">各服务与容器的内存和 CPU 占用</caption>
+        <caption class="sr-only">服务和容器的资源占用</caption>
         <thead><tr><th scope="col">名称</th><th scope="col">内存</th><th scope="col">CPU</th></tr></thead>
-        <tbody id="svc-rows"><tr><td colspan="3" class="panel-hint">读取中…</td></tr></tbody>
+        <tbody id="svc-rows"><tr><td colspan="3" class="panel-hint">正在读取数据</td></tr></tbody>
       </table>
     </div>
   </section>
 
-  <footer class="foot">状态于 <time>$when</time> 检查 · 数据来自服务端探活</footer>
+  <footer class="foot">探活时间：<time>$when</time></footer>
 </main>
 
 <script>
@@ -154,7 +154,7 @@ $stats_strip
       if (!r.ok) return;
       const d = await r.json();
 
-      $('stamp').textContent = '运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString();
+      $('stamp').textContent = '已运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString();
 
       const hist = Array.isArray(d.history) ? d.history : [];
       const n = hist.length;
@@ -187,7 +187,7 @@ $stats_strip
       const t1 = have ? s.ts[have - 1] : d.ts;
       const winSec = Math.max(0, t1 - t0);
       const spanSec = winSec;
-      $('span').textContent = have < 2 ? '刚启动，正在积累' : '最近 ' + human(spanSec);
+      $('span').textContent = have < 2 ? '正在收集指标' : '最近 ' + human(spanSec);
       const labels = [clock(t0), clock(Math.round((t0 + t1) / 2)), clock(t1)];
       ['1', '2', '3'].forEach(k => {
         $('ax-left-' + k).textContent = labels[0];

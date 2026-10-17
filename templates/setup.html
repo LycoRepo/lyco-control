@@ -11,19 +11,20 @@
 </head>
 <body class="centered">
 <main class="authbox">
-  <h1 class="auth-title">第一次使用</h1>
-  <p class="auth-sub">给这个入口设一个密码，之后从这里进去的所有服务都用它。</p>
+  <h1 class="auth-title">设置共用密码</h1>
+  <p class="auth-sub">共用密码用于访问此入口下的服务。</p>
   $error_block
   <form method="post" action="/setup" class="stack">
+    <input type="hidden" name="t" value="$setup_token">
     <label class="field">
-      <span class="field-label">密码（至少 10 位）</span>
+      <span class="field-label">共用密码（至少 10 个字符）</span>
       <input type="password" name="password" autofocus autocomplete="new-password" required>
     </label>
     <label class="field">
-      <span class="field-label">再输一次</span>
+      <span class="field-label">确认密码</span>
       <input type="password" name="confirm" autocomplete="new-password" required>
     </label>
-    <button type="submit" class="btn primary">保存并进入</button>
+    <button type="submit" class="btn primary">保存密码并登录</button>
   </form>
 </main>
 </body>

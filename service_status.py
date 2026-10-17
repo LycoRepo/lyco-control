@@ -35,12 +35,27 @@ def unit_state(unit: str) -> dict:
     return out
 
 
+MAX_TAIL_BYTES = 256 * 1024      # 只从尾部读这么多，别把整个日志读进内存
+
+
 def tail(path: str, n: int = 14) -> list[str]:
+    """读日志的最后 n 行：从文件尾部按块往回读，不整份加载。"""
     if not path:
         return []
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            return [ln.rstrip("\n") for ln in fh.readlines()[-n:]]
+        if not os.path.isfile(path):          # 管道、设备文件直接拒绝，免得读阻塞
+            return ["（不是普通文件：{}）".format(path)]
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - MAX_TAIL_BYTES)
+            fh.seek(start)
+            data = fh.read()
+        text = data.decode("utf-8", "replace")
+        lines = text.splitlines()
+        if start > 0 and lines:
+            lines = lines[1:]                 # 第一行可能被截断，丢掉
+        return lines[-n:]
     except Exception as exc:
         return ["（读不到日志：{}）".format(type(exc).__name__)]
 

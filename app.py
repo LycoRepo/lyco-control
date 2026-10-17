@@ -62,7 +62,7 @@ GLOBAL_FAILS: list[float] = []         # 失败时间戳（滑动窗口）
 GLOBAL_UNTIL = 0.0
 LOGIN_LOG = os.environ.get("PORTAL_LOGIN_LOG", "")   # 审计日志，空则只写 stdout
 LOGIN_SEM = threading.Semaphore(2)     # 同时最多处理 2 个登录请求
-TITLE = os.environ.get("PORTAL_TITLE", "Server Panel")
+TITLE = os.environ.get("PORTAL_TITLE", "服务入口")
 
 DEFAULT_CONFIG = {
     "secret": "",
@@ -76,13 +76,13 @@ DEFAULT_CONFIG = {
         # 一个卡片 = 一个入口。url 是点进去的地址（可用 https://… 或站内 /detail?id=xxx）。
         # check 是服务端探活的地址（建议指向 127.0.0.1 上的真实端口）。
         # unit / log 可选：填了之后详情页会显示 systemd 状态和日志尾。
-        {"id": "service-a", "name": "示例服务 A", "desc": "点进去是它的 Web 面板",
+        {"id": "service-a", "name": "面板入口", "desc": "打开服务面板",
          "url": "https://panel-a.example.com/", "check": "http://127.0.0.1:8080/",
-         "icon": "🅰", "enabled": True},
-        {"id": "service-b", "name": "示例服务 B", "desc": "没有 Web 面板，看站内状态页",
+         "icon": "•", "enabled": True},
+        {"id": "service-b", "name": "服务状态", "desc": "查看服务状态和最近日志",
          "url": "/detail?id=service-b", "check": "http://127.0.0.1:9090/health",
          "unit": "myservice-b.service", "log": "/var/log/myservice-b.log",
-         "icon": "🅱", "enabled": True},
+         "icon": "•", "enabled": True},
     ],
 }
 
@@ -117,7 +117,9 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     tmp = "{}.{}.tmp".format(CFG_PATH, os.getpid())
-    with io.open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+    # 先用 0600 建文件再写：默认 umask 下临时文件可能是 0644，里面装着会话密钥
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with io.open(fd, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
         fh.flush()
         os.fsync(fh.fileno())
@@ -184,10 +186,10 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 def probe(target: str, timeout: float = 2.5) -> dict:
     if not target:
-        return {"up": None, "ms": None, "detail": "未配置"}
+        return {"up": None, "ms": None, "detail": "未配置探活地址"}
     scheme = urlparse(target).scheme.lower()
     if scheme not in ("http", "https"):
-        return {"up": None, "ms": None, "detail": "仅支持 http/https"}
+        return {"up": None, "ms": None, "detail": "仅支持 HTTP 或 HTTPS"}
     started = time.time()
     try:
         req = urllib.request.Request(target, method="GET", headers={"User-Agent": "panel-gate"})
@@ -210,7 +212,7 @@ def probe_all(services: list[dict]) -> list[dict]:
             st = service_status.unit_state(svc["unit"])
             active = st.get("active") == "active"
             results[idx] = {"up": active, "ms": None,
-                            "detail": "systemd: {}".format(st.get("active") or "unknown")}
+                            "detail": "服务单元状态：{}".format(st.get("active") or "未知")}
             return
         results[idx] = probe(svc.get("check", ""))
 
@@ -221,7 +223,7 @@ def probe_all(services: list[dict]) -> list[dict]:
         th.join(timeout=4)
     out = []
     for i, svc in enumerate(services):
-        r = results[i] or {"up": None, "ms": None, "detail": "超时"}
+        r = results[i] or {"up": None, "ms": None, "detail": "探活超时"}
         out.append({**svc, **r})
     return out
 
@@ -259,7 +261,7 @@ def stats_strip() -> str:
     ]
     body = "".join('<div class="stat-strip-item"><span class="k">{}</span>'
                    '<span class="v">{}</span></div>'.format(k, v) for k, v in cells)
-    return '<section class="stat-strip" aria-label="资源占用">' + body + '</section>'
+    return '<section class="stat-strip" aria-label="资源指标概览">' + body + '</section>'
 
 
 def brand_mark(title: str) -> str:
@@ -283,7 +285,10 @@ def card_msg(text: str, cls: str) -> str:
 # ---------- 渲染 ----------
 
 def render(template: str, **ctx) -> bytes:
-    ctx.setdefault("title", TITLE)
+    # 标题是用户可在 /admin 改的自由文本，进模板前必须转义（safe_substitute 不做 HTML 转义）
+    ctx["title"] = html_mod.escape(str(ctx.get("title", TITLE)))
+    if "title_attr" in ctx:
+        ctx["title_attr"] = html_mod.escape(str(ctx["title_attr"]))
     with io.open(os.path.join(TPL_DIR, template), encoding="utf-8") as fh:
         raw = fh.read()
     return Template(raw).safe_substitute(**ctx).encode("utf-8")
@@ -299,10 +304,10 @@ def status_class(up) -> str:
 
 def status_text(up, detail: str = "", ms=None) -> str:
     if up is True:
-        return "在线 · {}ms".format(ms) if ms is not None else "在线"
+        return "在线 · {} 毫秒".format(ms) if ms is not None else "在线"
     if up is False:
-        return "离线 · {}".format(detail) if detail else "离线"
-    return "未检查"
+        return "异常 · {}".format(detail) if detail else "异常"
+    return "未探活"
 
 
 def metrics_block_html(cfg: dict) -> str:
@@ -313,14 +318,14 @@ def metrics_block_html(cfg: dict) -> str:
     st = metrics.state()
     sec = st.get("span") or 0
     if st["points"] < 2:
-        headline = "刚开始记录"
+        headline = "正在收集指标"
     elif sec < 90:
         headline = "已记录 {} 秒".format(sec)
     elif sec < 5400:
         headline = "已记录 {} 分钟".format(round(sec / 60))
     else:
         headline = "已记录 {:.1f} 小时".format(sec / 3600)
-    note = "{}（{} 个点，每 {} 秒一个）· 放内存盘里，机器重启清空".format(
+    note = "{}。共 {} 个点，每 {} 秒采样。重启后清空。".format(
         headline, st["points"], st["bucket"])
     return (
         '<form method="post" action="/admin/metrics" class="settings">'
@@ -331,9 +336,9 @@ def metrics_block_html(cfg: dict) -> str:
         '<span class="settings-unit">小时</span>'
         '</div>'
         '<label class="check"><input type="checkbox" name="short" value="1"{}> '
-        '用原来的 6 分钟模式（3 秒一个点）</label>'
+        '仅保留最近 6 分钟（每 3 秒采样）</label>'
         '<p class="settings-note">{}</p>'
-        '<button type="submit" class="btn primary">保存设置</button>'
+        '<button type="submit" class="btn primary">保存指标设置</button>'
         '</form>'
     ).format(hours, short_checked, note)
 
@@ -354,13 +359,13 @@ def cards_html(services: list[dict]) -> str:
             '<span class="pill {cls}">{txt}</span></a>'.format(
                 url=html_mod.escape(quote(url, safe=":/?#[]@!&'()*+,;=%")),
                 icon=html_mod.escape(str(svc.get("icon", "•"))),
-                name=html_mod.escape(str(svc.get("name", "未命名"))),
+                name=html_mod.escape(str(svc.get("name", "未命名卡片"))),
                 desc=html_mod.escape(str(svc.get("desc", ""))),
                 cls=cls,
                 txt=html_mod.escape(txt),
             )
         )
-    return "\n".join(rows) or '<p class="empty">还没有启用的卡片，去「编辑」里加一个。</p>'
+    return "\n".join(rows) or '<p class="empty">暂无启用的卡片，请前往入口设置。</p>'
 
 
 def admin_rows(services: list[dict]) -> str:
@@ -375,8 +380,8 @@ def admin_rows(services: list[dict]) -> str:
             '<td><input name="desc_{i}" value="{desc}" class="w-desc"></td>'
             '<td><input name="url_{i}" value="{url}" class="w-url"></td>'
             '<td><input name="check_{i}" value="{check}" class="w-check"></td>'
-            '<td><input name="unit_{i}" value="{unit}" class="w-unit" placeholder="xxx.service"></td>'
-            '<td><input name="log_{i}" value="{log}" class="w-log" placeholder="/var/log/xxx.log"></td>'
+            '<td><input name="unit_{i}" value="{unit}" class="w-unit" placeholder="服务单元名称"></td>'
+            '<td><input name="log_{i}" value="{log}" class="w-log" placeholder="日志文件路径"></td>'
             '<td class="center"><input type="checkbox" name="enabled_{i}" {checked}></td>'
             '</tr>'.format(i=i, sid=html_mod.escape(str(svc.get("id") or slug(svc.get("name", "")))),
                            icon=html_mod.escape(str(svc.get("icon", ""))),
@@ -469,11 +474,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.cfg.get("password_hash"):
                 return self._redirect("/login")
             if not self._setup_allowed():
-                return self._send(b"<h1>403</h1><p>setup token required</p>", 403)
-            return self._send(self.render("setup.html", error_block=""))
+                return self._send(b"<h1>403</h1><p>\xe8\xaf\xb7\xe4\xbd\xbf\xe7\x94\xa8\xe6\x9c\x89\xe6\x95\x88\xe7\x9a\x84\xe5\x88\x9d\xe5\xa7\x8b\xe8\xae\xbe\xe7\xbd\xae\xe9\x93\xbe\xe6\x8e\xa5</p>", 403)
+            return self._send(self.render("setup.html", error_block="",
+                                          setup_token=self.cfg.get("setup_token", "")))
         if path == "/login":
             slow = parse_qs(urlparse(self.path).query).get("slow") == ["1"]
-            note = card_msg("请求太频繁，稍等一下再试", "err") if slow else ""
+            note = card_msg("请求频繁，请稍后重试", "err") if slow else ""
             return self._send(self.render("login.html", error_block=note, next=quote(self._next())))
         if path == "/logout":
             return self._redirect("/login", extra=["Set-Cookie: " + self._cookie_header("", 0)])
@@ -492,7 +498,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/metrics":
             metrics.ensure_sampler()
             payload = metrics.last()
-            payload["services"] = metrics.services()
+            payload["services"] = metrics.last_services()
             return self._send(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                               200, "application/json; charset=utf-8",
                               extra=["Cache-Control: no-store"])
@@ -502,14 +508,14 @@ class Handler(BaseHTTPRequestHandler):
             svc = next((s for s in self.cfg["services"]
                         if key and key in (s.get("name"), s.get("id"))), None)
             if not svc:
-                return self._send("<h1>404 — no such service</h1>".encode("utf-8"), 404)
+                return self._send("<h1>404 — 服务不存在</h1>".encode("utf-8"), 404)
             snap = service_status.snapshot(svc)
             st = snap["state"]
             return self._send(self.render(
                 "detail.html",
                 name=html_mod.escape(svc.get("name", "")),
                 desc=html_mod.escape(svc.get("desc", "")),
-                unit=html_mod.escape(svc.get("unit", "") or "（未配置 unit）"),
+                unit=html_mod.escape(svc.get("unit", "") or "未配置服务单元"),
                 active=st["active"] or "—",
                 enabled=st["enabled"] or "—",
                 rss=st["rss"] if st["rss"] is not None else "—",
@@ -519,7 +525,7 @@ class Handler(BaseHTTPRequestHandler):
                 health_text="正常" if snap["health"]["ok"] else "失败",
                 health_ok=snap["health"]["ok"],
                 health_detail=html_mod.escape(snap["health"]["detail"]),
-                log=html_mod.escape("\n".join(snap["log"]) or "（这个卡片没配 log）"),
+                log=html_mod.escape("\n".join(snap["log"]) or "未配置日志文件"),
             ))
         return self._send(b"<h1>404</h1>", 404)
 
@@ -528,21 +534,23 @@ class Handler(BaseHTTPRequestHandler):
         form = self._body()
         if getattr(self, "_too_large", False):
             self.close_connection = True    # 残余 body 不能被当成下一个请求解析
-            return self._send(b"payload too large", 413, "text/plain",
+            return self._send(b"\xe6\x8f\x90\xe4\xba\xa4\xe5\x86\x85\xe5\xae\xb9\xe8\xbf\x87\xe5\xa4\xa7", 413, "text/plain",
                               extra=["Connection: close"])
         if not self._same_origin():
-            return self._send(b"cross-origin POST rejected", 403, "text/plain")
+            return self._send(b"\xe4\xb8\x8d\xe5\x85\x81\xe8\xae\xb8\xe8\xb7\xa8\xe7\xab\x99\xe6\x8f\x90\xe4\xba\xa4", 403, "text/plain")
         if path == "/setup":
             if self.cfg.get("password_hash"):
                 return self._redirect("/login")
-            if not self._setup_allowed():
-                return self._send(b"<h1>403</h1><p>setup token required</p>", 403)
+            if not self._setup_allowed(form.get("t", "")):
+                return self._send(b"<h1>403</h1><p>\xe8\xaf\xb7\xe4\xbd\xbf\xe7\x94\xa8\xe6\x9c\x89\xe6\x95\x88\xe7\x9a\x84\xe5\x88\x9d\xe5\xa7\x8b\xe8\xae\xbe\xe7\xbd\xae\xe9\x93\xbe\xe6\x8e\xa5</p>", 403)
             pw = form.get("password", "")
             if len(pw) < MIN_PASSWORD:
                 return self._send(self.render("setup.html",
-                                         error_block=card_msg("至少 {} 个字符".format(MIN_PASSWORD), "err")), 400)
+                                         error_block=card_msg("密码至少需要 {} 个字符".format(MIN_PASSWORD), "err"),
+                                         setup_token=self.cfg.get("setup_token", "")), 400)
             if pw != form.get("confirm", ""):
-                return self._send(self.render("setup.html", error_block=card_msg("两次输入不一致", "err")), 400)
+                return self._send(self.render("setup.html", error_block=card_msg("两次输入的密码不一致", "err"),
+                                         setup_token=self.cfg.get("setup_token", "")), 400)
             with CFG_LOCK:
                 self.cfg["password_hash"] = hash_password(pw)
                 self.cfg["setup_token"] = ""
@@ -554,7 +562,7 @@ class Handler(BaseHTTPRequestHandler):
             blocked, wait = self._login_blocked()
             if blocked:
                 return self._send(self.render("login.html",
-                                         error_block=card_msg("尝试次数过多，{} 秒后再试".format(wait), "err"),
+                                         error_block=card_msg("尝试过多，请在 {} 秒后重试".format(wait), "err"),
                                          next=quote(form.get("next", "/"))), 429,
                                   extra=["Retry-After: {}".format(max(wait, 1))])
             if self._global_slow():
@@ -570,7 +578,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._redirect(target, extra=["Set-Cookie: " + self._cookie_header(
                     make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_SECONDS)])
             time.sleep(0.4)
-            return self._send(self.render("login.html", error_block=card_msg("密码不对", "err"),
+            return self._send(self.render("login.html", error_block=card_msg("密码错误", "err"),
                                      next=quote(form.get("next", "/"))), 401)
         if not self._logged_in():
             return self._redirect("/login")
@@ -711,10 +719,15 @@ class Handler(BaseHTTPRequestHandler):
         ctx.setdefault("brand_mark", html_mod.escape(brand_mark(title)))
         return render(template, **ctx)
 
-    def _setup_allowed(self) -> bool:
-        """首次设密码必须带 ?t=<setup_token>（token 只在服务日志里出现），防止被人抢先设密码。"""
-        qs = parse_qs(urlparse(self.path).query)
-        given = (qs.get("t") or [""])[0]
+    def _setup_allowed(self, given: str | None = None) -> bool:
+        """首次设密码必须有 setup_token。
+
+        链接里的 ?t= 和表单里的隐藏字段都认：表单 action 是 /setup（不带查询串），
+        只看查询串的话第一次提交必然 403，谁都设不成密码。
+        """
+        if given is None:
+            qs = parse_qs(urlparse(self.path).query)
+            given = (qs.get("t") or [""])[0]
         want = self.cfg.get("setup_token", "")
         try:
             return bool(want) and hmac.compare_digest(given.encode("utf-8"), want.encode("utf-8"))
@@ -753,10 +766,10 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path: str):
         rel = path[len("/static/"):]
         if ".." in rel or rel.startswith("/"):
-            return self._send(b"bad", 400, "text/plain")
+            return self._send(b"\xe8\xaf\xb7\xe6\xb1\x82\xe6\x97\xa0\xe6\x95\x88", 400, "text/plain")
         full = os.path.join(STATIC_DIR, rel)
         if not os.path.isfile(full):
-            return self._send(b"not found", 404, "text/plain")
+            return self._send(b"\xe6\x96\x87\xe4\xbb\xb6\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8", 404, "text/plain")
         ext = os.path.splitext(full)[1].lower()
         ctype = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml",
                  ".png": "image/png", ".ico": "image/x-icon"}.get(ext, "application/octet-stream")
@@ -786,27 +799,27 @@ class Handler(BaseHTTPRequestHandler):
             self.cfg["services"] = services
             save_config(self.cfg)
         return self._send(self.render("admin.html", rows=admin_rows(services),
-                                 msg_block=card_msg("已保存", "ok"), path=CFG_PATH))
+                                 msg_block=card_msg("卡片设置已保存", "ok"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)))
 
     def _save_password(self, form: dict):
         old = form.get("old", "")
         new = form.get("new", "")
         if not verify_password(old, self.cfg.get("password_hash", "")):
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
-                                     msg_block=card_msg("原密码不对", "err"), path=CFG_PATH), 401)
+                                     msg_block=card_msg("原密码错误", "err"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)), 401)
         if len(new) < MIN_PASSWORD:
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
-                                     msg_block=card_msg("新密码至少 {} 个字符".format(MIN_PASSWORD), "err"),
-                                     path=CFG_PATH), 400)
+                                     msg_block=card_msg("新密码至少需要 {} 个字符".format(MIN_PASSWORD), "err"),
+                                     path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)), 400)
         if new != form.get("confirm", ""):
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
-                                     msg_block=card_msg("两次输入不一致", "err"), path=CFG_PATH), 400)
+                                     msg_block=card_msg("两次输入的密码不一致", "err"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)), 400)
         with CFG_LOCK:
             self.cfg["password_hash"] = hash_password(new)
             self.cfg["session_epoch"] = secrets_token()   # 其它设备上的旧 cookie 立即失效
             save_config(self.cfg)
         return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
-                                 msg_block=card_msg("密码已更新（其它设备需要重新登录）", "ok"), path=CFG_PATH),
+                                 msg_block=card_msg("密码已更新，其他设备需重新登录", "ok"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)),
                           extra=["Set-Cookie: " + self._cookie_header(
                               make_session(self.cfg["secret"], self.cfg["session_epoch"]),
                               SESSION_SECONDS)])

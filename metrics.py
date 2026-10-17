@@ -32,6 +32,7 @@ _last_sample_ts = 0.0
 _latest: dict | None = None
 
 history: deque[dict] = deque(maxlen=HISTORY_LEN)
+_lock = threading.Lock()          # 保护 history / _prev_cg / _latest_services
 
 
 def _read(path: str) -> str:
@@ -118,17 +119,18 @@ def sample() -> dict:
     }
     # 写进当前这一分钟的桶：同一分钟内的采样做平均，跨分钟才新增一个点
     minute = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
-    if history and history[-1]["ts"] == minute:
-        b = history[-1]
-        n = b["n"] + 1
-        b["cpu"] = (b["cpu"] * (n - 1) + item["cpu"]) / n
-        b["mem_pct"] = (b["mem_pct"] * (n - 1) + item["mem_pct"]) / n
-        b["rx_kbs"] = (b["rx_kbs"] * (n - 1) + item["rx_kbs"]) / n
-        b["tx_kbs"] = (b["tx_kbs"] * (n - 1) + item["tx_kbs"]) / n
-        b["n"] = n
-    else:
-        history.append({"ts": minute, "cpu": item["cpu"], "mem_pct": item["mem_pct"],
-                        "rx_kbs": item["rx_kbs"], "tx_kbs": item["tx_kbs"], "n": 1})
+    with _lock:
+        if history and history[-1]["ts"] == minute:
+            b = history[-1]
+            n = b["n"] + 1
+            b["cpu"] = (b["cpu"] * (n - 1) + item["cpu"]) / n
+            b["mem_pct"] = (b["mem_pct"] * (n - 1) + item["mem_pct"]) / n
+            b["rx_kbs"] = (b["rx_kbs"] * (n - 1) + item["rx_kbs"]) / n
+            b["tx_kbs"] = (b["tx_kbs"] * (n - 1) + item["tx_kbs"]) / n
+            b["n"] = n
+        else:
+            history.append({"ts": minute, "cpu": item["cpu"], "mem_pct": item["mem_pct"],
+                            "rx_kbs": item["rx_kbs"], "tx_kbs": item["tx_kbs"], "n": 1})
     _maybe_save(now)
 
     result = {
@@ -149,11 +151,7 @@ def sample() -> dict:
             "free_gb": round(disk_free / 1024 ** 3, 1),
             "pct": round(100.0 * disk_used / disk_total, 1) if disk_total else 0.0,
         },
-        "history": [
-            {"ts": b["ts"], "cpu": round(b["cpu"], 2), "mem_pct": round(b["mem_pct"], 2),
-             "rx_kbs": round(b["rx_kbs"], 1), "tx_kbs": round(b["tx_kbs"], 1)}
-            for b in history
-        ],
+        "history": _history_snapshot(),
     }
     _latest = result
     return result
@@ -167,6 +165,7 @@ def _sampler_loop() -> None:
     while True:
         try:
             sample()
+            services()          # cgroup 基线也走固定节奏，多客户端不会互相干扰
         except Exception:
             pass
         time.sleep(SAMPLER_INTERVAL)
@@ -272,6 +271,13 @@ def load_history() -> int:
         return 0
 
 
+def _history_snapshot() -> list[dict]:
+    with _lock:
+        return [{"ts": b["ts"], "cpu": round(b["cpu"], 2), "mem_pct": round(b["mem_pct"], 2),
+                 "rx_kbs": round(b["rx_kbs"], 1), "tx_kbs": round(b["tx_kbs"], 1)}
+                for b in history]
+
+
 def last() -> dict:
     """取最近一次采样结果；还没采过就现采一次。不推进历史（页面渲染用）。"""
     if _latest is None:
@@ -284,6 +290,7 @@ def last() -> dict:
 CGROUP_ROOT = "/sys/fs/cgroup/system.slice"
 NAMES_PATH = "/var/lib/lyco-portal-ceil/containers.json"   # 由 lyco-container-names.timer 生成
 _prev_cg: dict[str, tuple[float, int]] = {}
+_latest_services: list[dict] = []      # 采样线程刷新，请求只读这份
 
 
 def _read_int(path: str) -> int:
@@ -311,6 +318,13 @@ def _container_names() -> dict[str, str]:
             return json.load(fh)
     except Exception:
         return {}
+
+
+def last_services(limit: int = 8) -> list[dict]:
+    """读最近一次采样算出来的服务占用（不推进 cgroup 基线）。"""
+    if not _latest_services:
+        return services(limit)
+    return _latest_services[:limit]
 
 
 def services(limit: int = 8) -> list[dict]:
@@ -366,4 +380,11 @@ def services(limit: int = 8) -> list[dict]:
         })
 
     rows.sort(key=lambda r: r["mem_mb"], reverse=True)
+    global _latest_services
+    with _lock:
+        _latest_services = rows[:limit]
+        # 已经消失的 cgroup 不要把基线一直留着，否则字典只增不减
+        alive = set(entries)
+        for key in [k for k in _prev_cg if k not in alive]:
+            _prev_cg.pop(key, None)
     return rows[:limit]

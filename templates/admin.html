@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>编辑 · $title</title>
+<title>入口设置 · $title</title>
 <link rel="icon" href="/static/icon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
@@ -15,21 +15,21 @@
   <div class="bar-inner">
     <div class="brand"><a class="brand-link" href="/"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></a></div>
     <nav class="topnav" aria-label="主导航">
-      <a class="navlink" href="/">返回</a>
-      <a class="navlink" href="/logout">退出</a>
+      <a class="navlink" href="/">返回首页</a>
+      <a class="navlink" href="/logout">退出登录</a>
     </nav>
   </div>
 </header>
 
 <main class="wrap admin-wrap">
-  <h1 class="sr-only">编辑入口</h1>
+  <h1 class="sr-only">入口设置</h1>
   <section class="panel" aria-labelledby="name-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="name-title">名称</h2>
-      <p class="panel-hint">左上角显示的名字，浏览器标题也用它。</p>
+      <h2 class="panel-title" id="name-title">入口名称</h2>
+      <p class="panel-hint">入口名称显示在页首和浏览器标题中。</p>
     </div>
     <form method="post" action="/admin/title" class="stack narrow">
-      <label class="field"><span class="field-label">标题</span>
+      <label class="field"><span class="field-label">入口名称</span>
         <input type="text" name="title" value="$title_attr" maxlength="40" required></label>
       <button type="submit" class="btn primary">保存名称</button>
     </form>
@@ -37,14 +37,14 @@
 
   <section class="panel" aria-labelledby="cards-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="cards-title">卡片</h2>
-      <p class="panel-hint">改名、改地址、关掉某个卡片，都不用改代码。改完点保存。探活地址留空、只填服务单元时，按 systemd 状态判断在线（没有毫秒数）。</p>
+      <h2 class="panel-title" id="cards-title">卡片设置</h2>
+      <p class="panel-hint">设置卡片名称、链接和显示状态。探活地址留空时，使用服务单元状态。服务单元探活不显示响应时间。</p>
     </div>
     $msg_block
     <form method="post" action="/admin/services">
-      <div class="table-scroll" tabindex="0" role="region" aria-label="卡片配置表格，可左右滚动">
+      <div class="table-scroll" tabindex="0" role="region" aria-label="卡片设置表格，可左右滚动">
         <table class="table">
-          <caption class="sr-only">卡片配置，改完点保存。</caption>
+          <caption class="sr-only">卡片设置</caption>
           <thead>
             <tr><th scope="col">图标</th><th scope="col">名称</th><th scope="col">说明</th><th scope="col">链接</th><th scope="col">探活地址</th><th scope="col">服务单元</th><th scope="col">日志文件</th><th scope="col">启用</th></tr>
           </thead>
@@ -53,33 +53,33 @@ $rows
           </tbody>
         </table>
       </div>
-      <p class="table-help">左右滑动表格，改完点保存。</p>
+      <p class="table-help">可左右滚动查看全部字段。</p>
       <div class="row-actions">
-        <button type="button" class="btn ghost" onclick="addRow()">+ 加一行</button>
-        <button type="submit" class="btn primary">保存卡片</button>
+        <button type="button" class="btn ghost" onclick="addRow()">添加卡片</button>
+        <button type="submit" class="btn primary">保存卡片设置</button>
       </div>
     </form>
   </section>
 
   <section class="panel" aria-labelledby="metrics-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="metrics-title">资源历史</h2>
-      <p class="panel-hint">曲线保留多久，以及要不要用原来只留 6 分钟的方式。</p>
+      <h2 class="panel-title" id="metrics-title">指标历史</h2>
+      <p class="panel-hint">设置指标保留时长和采样模式。</p>
     </div>
     $metrics_block
   </section>
 
   <section class="panel" aria-labelledby="password-title">
     <div class="panel-heading">
-      <h2 class="panel-title" id="password-title">密码</h2>
-      <p class="panel-hint">改的是这个入口的密码，与各服务自己的账号密码无关。</p>
+      <h2 class="panel-title" id="password-title">共用密码</h2>
+      <p class="panel-hint">更新共用密码不影响各服务的账号密码。</p>
     </div>
     <form method="post" action="/admin/password" class="stack narrow">
       <label class="field"><span class="field-label">原密码</span>
         <input type="password" name="old" autocomplete="current-password" required></label>
-      <label class="field"><span class="field-label">新密码（至少 10 位）</span>
+      <label class="field"><span class="field-label">新密码（至少 10 个字符）</span>
         <input type="password" name="new" autocomplete="new-password" required></label>
-      <label class="field"><span class="field-label">再输一次</span>
+      <label class="field"><span class="field-label">确认新密码</span>
         <input type="password" name="confirm" autocomplete="new-password" required></label>
       <button type="submit" class="btn primary">更新密码</button>
     </form>
@@ -95,12 +95,12 @@ function addRow() {
   const tr = document.createElement('tr');
   tr.innerHTML = [
     '<td><input name="icon_' + i + '" value="•" class="w-icon"></td>',
-    '<td><input name="name_' + i + '" value="" class="w-name" placeholder="新卡片"></td>',
+    '<td><input name="name_' + i + '" value="" class="w-name" placeholder="卡片名称"></td>',
     '<td><input name="desc_' + i + '" value="" class="w-desc"></td>',
     '<td><input name="url_' + i + '" value="https://" class="w-url"></td>',
     '<td><input name="check_' + i + '" value="http://127.0.0.1:" class="w-check"></td>',
-    '<td><input name="unit_' + i + '" value="" class="w-unit" placeholder="xxx.service"></td>',
-    '<td><input name="log_' + i + '" value="" class="w-log" placeholder="/var/log/xxx.log"></td>',
+    '<td><input name="unit_' + i + '" value="" class="w-unit" placeholder="服务单元名称"></td>',
+    '<td><input name="log_' + i + '" value="" class="w-log" placeholder="日志文件路径"></td>',
     '<td class="center"><input type="checkbox" name="enabled_' + i + '" checked></td>'
   ].join('');
   tb.appendChild(tr);

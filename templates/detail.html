@@ -15,9 +15,9 @@
   <div class="bar-inner">
     <div class="brand"><a class="brand-link" href="/"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></a></div>
     <nav class="topnav" aria-label="主导航">
-      <a class="navlink" href="/">返回</a>
-      <a class="navlink" href="/admin">编辑</a>
-      <a class="navlink" href="/logout">退出</a>
+      <a class="navlink" href="/">返回首页</a>
+      <a class="navlink" href="/admin">打开设置</a>
+      <a class="navlink" href="/logout">退出登录</a>
     </nav>
   </div>
 </header>
@@ -34,11 +34,11 @@
     <div class="table-scroll">
       <table class="table">
         <tbody>
-          <tr><th>systemd 单元</th><td>$unit</td></tr>
-          <tr><th>运行中</th><td><span class="pill $active_cls">$active</span></td></tr>
-          <tr><th>开机自启</th><td><span class="pill $enabled_cls">$enabled</span></td></tr>
-          <tr><th>常驻内存</th><td>$rss MB</td></tr>
-          <tr><th>探活</th><td><span class="pill $health_cls">$health_text</span></td></tr>
+          <tr><th>服务单元</th><td>$unit</td></tr>
+          <tr><th>运行状态</th><td><span class="pill $active_cls">$active</span></td></tr>
+          <tr><th>开机启动状态</th><td><span class="pill $enabled_cls">$enabled</span></td></tr>
+          <tr><th>内存占用</th><td>$rss MB</td></tr>
+          <tr><th>探活结果</th><td><span class="pill $health_cls">$health_text</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -50,7 +50,7 @@
     <pre class="logbox">$log</pre>
   </section>
 
-  <footer class="foot">这一页是门户直读的：systemd 状态、/proc 里的内存、探活响应、日志尾。</footer>
+  <footer class="foot">此页显示服务状态、内存占用、探活结果和最近日志。</footer>
 </main>
 </body>
 </html>

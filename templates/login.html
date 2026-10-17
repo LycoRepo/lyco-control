@@ -14,15 +14,15 @@
 <main class="authbox" aria-labelledby="login-title">
   <img class="brand-img auth-mark" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true">
   <h1 class="auth-title" id="login-title">$title</h1>
-  <p class="auth-sub">输入访问密码</p>
+  <p class="auth-sub">输入共用密码以登录。</p>
   $error_block
   <form method="post" action="/login" class="stack">
     <input type="hidden" name="next" value="$next">
     <label class="field">
-      <span class="field-label">密码</span>
+      <span class="field-label">共用密码</span>
       <input type="password" name="password" autofocus autocomplete="current-password" required>
     </label>
-    <button type="submit" class="btn primary">进入</button>
+    <button type="submit" class="btn primary">登录入口</button>
   </form>
 </main>
 </body>
