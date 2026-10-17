@@ -111,8 +111,7 @@ sudo journalctl -u lyco-control --no-pager -n 30
 | `PORTAL_SECURE` | `0` | HTTPS 就绪后设 1，cookie 加 `Secure` |
 | `PORTAL_SESSION_HOURS` | `8` | 登录有效期（小时） |
 | `PORTAL_LOGIN_LOG` | 空 | 登录审计日志路径；记录成功/失败、IP、时间，超 1 MB 自动轮转 |
-| `PORTAL_METRICS_HOURS` | `24` | 资源曲线窗口长度（小时）；每分钟一个点 |
-| `PORTAL_METRICS_PERSIST` | `0` | 设 `1` 时把历史放 `/run`（内存盘），服务重启后接着画 |
+| `PORTAL_METRICS_HOURS` | `24` | 资源曲线窗口长度（小时），仅默认模式生效 |
 | `PORTAL_METRICS_FILE` | `/run/lyco-portal/metrics-history.json` | 存放位置；仅开关打开时有效，想落磁盘才自己指到别处 |
 
 ### `portal.json` 里的卡片
@@ -151,14 +150,14 @@ sudo journalctl -u lyco-control --no-pager -n 30
 
 `metrics.py` 只读 `/proc`、`statvfs` 和 cgroup v2，不装 agent。后端每 3 秒采一次，按分钟聚合成一个点；默认最多存 1440 个点（24 小时），页面每 3 秒读一次 `/api/metrics` 拿快照。横轴只画已有的数据：从第一个点画到最后一个点，不预留后面的空白。
 
-**要不要跨服务重启保留，在 `/admin` →「资源历史」里点选**，不用改文件、不用重启。**全程不写磁盘**——开的时候放 `/run`（tmpfs，内存盘）：
+历史固定放在 `/run`（tmpfs，内存盘）：服务重启后接着画，机器重启清空，全程不写硬盘。
 
-| 开关 | 行为 | 存在哪 |
-|---|---|---|
-| 关（默认） | 服务一重启就清零，从头攒 | 进程内存 |
-| 开 | 服务重启后接着上一次的曲线；机器重启清空 | `/run/lyco-portal/metrics-history.json` |
+**窗口有两种模式**，在 `/admin` →「资源历史」里切：
 
-用 `/run` 是有意的：服务重启不会丢（不是每次重部署都从零攒），又不浪费 SSD 寿命。想连机器重启都保留，就把 `PORTAL_METRICS_FILE` 指到 `/var/lib/...`。
+| 模式 | 采样 | 点数 | 能看多久 |
+|---|---|---|---|
+| 默认 | 每分钟一个点 | 1440 | 24 小时（时长可改，1–168 小时） |
+| 原来那套 | 每 3 秒一个点 | 120 | 6 分钟，曲线更细 |
 
 `/run` 下这个目录要开机自动建，加一条 tmpfiles 规则：
 
@@ -167,7 +166,7 @@ echo 'd /run/lyco-portal 0755 <运行用户> <运行用户> -' | sudo tee /etc/t
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/lyco-portal.conf
 ```
 
-窗口长度（保留多少小时）也在同一处改。两个值存在 `portal.json` 的 `metrics` 段里；环境变量 `PORTAL_METRICS_PERSIST` / `PORTAL_METRICS_HOURS` 只作为首次运行的默认值，之后以页面里的为准。关掉开关时会顺手删掉历史文件，免得下次打开把旧数据读回来。
+两个值存在 `portal.json` 的 `metrics` 段里；环境变量 `PORTAL_METRICS_HOURS` 只作为首次运行的默认值，之后以页面里的为准。切换模式时不会混用旧档：存档里记着采样间隔，跟当前模式对不上就直接弃用。
 
 开启时，重启那几十秒的空白补不上——只会在上次的点之后接着画。窗口长度也在页面里改，调大只会让内存占用按比例变大（每小时 60 个点）。
 

@@ -70,8 +70,8 @@ DEFAULT_CONFIG = {
     "session_epoch": "",
     "setup_token": "",
     "title": TITLE,
-    # 资源曲线：窗口长度（小时）与「重启后是否接着画」。UI 里能改，这里只是默认值。
-    "metrics": {"persist": False, "hours": 24},
+    # 资源曲线：窗口长度（小时）与是否用原始 6 分钟模式。UI 里能改，这里只是默认值。
+    "metrics": {"hours": 24, "short": False},
     "services": [
         # 一个卡片 = 一个入口。url 是点进去的地址（可用 https://… 或站内 /detail?id=xxx）。
         # check 是服务端探活的地址（建议指向 127.0.0.1 上的真实端口）。
@@ -306,14 +306,22 @@ def status_text(up, detail: str = "", ms=None) -> str:
 
 
 def metrics_block_html(cfg: dict) -> str:
-    """资源设置。文案按「不出现术语、每句说一件事」写：看多久 / 重启后还在不在 / 现在记了多少。"""
+    """资源设置：保留多久、以及要不要用原来那套 6 分钟模式。"""
     mx = cfg.get("metrics") or {}
-    checked = " checked" if mx.get("persist") else ""
+    short_checked = " checked" if mx.get("short") else ""
     hours = mx.get("hours", 24)
     st = metrics.state()
-    mins = st["points"]
-    kept = ("已记录 {} 分钟 · 只放内存，不写硬盘，机器重启清空".format(mins) if st["persist"]
-            else "已记录 {} 分钟 · 只放内存，服务重启清空".format(mins))
+    sec = st.get("span") or 0
+    if st["points"] < 2:
+        headline = "刚开始记录"
+    elif sec < 90:
+        headline = "已记录 {} 秒".format(sec)
+    elif sec < 5400:
+        headline = "已记录 {} 分钟".format(round(sec / 60))
+    else:
+        headline = "已记录 {:.1f} 小时".format(sec / 3600)
+    note = "{}（{} 个点，每 {} 秒一个）· 放内存盘里，机器重启清空".format(
+        headline, st["points"], st["bucket"])
     return (
         '<form method="post" action="/admin/metrics" class="settings">'
         '<div class="settings-row">'
@@ -322,12 +330,12 @@ def metrics_block_html(cfg: dict) -> str:
         'min="1" max="168" step="1" value="{}" required>'
         '<span class="settings-unit">小时</span>'
         '</div>'
-        '<label class="check"><input type="checkbox" name="persist" value="1"{}> '
-        '服务重启后继续保留</label>'
+        '<label class="check"><input type="checkbox" name="short" value="1"{}> '
+        '用原来的 6 分钟模式（3 秒一个点）</label>'
         '<p class="settings-note">{}</p>'
         '<button type="submit" class="btn primary">保存设置</button>'
         '</form>'
-    ).format(hours, checked, kept)
+    ).format(hours, short_checked, note)
 
 
 def cards_html(services: list[dict]) -> str:
@@ -581,13 +589,14 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 hours = 24
             hours = max(1, min(168, hours))
-            persist = (form.get("persist") or "") not in ("", "0", "off", "false")
+            short = (form.get("short") or "") not in ("", "0", "off", "false")
             with CFG_LOCK:
                 self.cfg.setdefault("metrics", {})
+                self.cfg["metrics"].pop("persist", None)     # 旧版本留下的键，已不用
                 self.cfg["metrics"]["hours"] = hours
-                self.cfg["metrics"]["persist"] = persist
+                self.cfg["metrics"]["short"] = short
                 save_config(self.cfg)
-            metrics.configure(persist=persist, hours=hours)
+            metrics.configure(hours=hours, short=short)
             return self._redirect("/admin")
         if path == "/admin/password":
             return self._save_password(form)
@@ -812,7 +821,8 @@ def main() -> None:
     # 窗口长度与落盘开关先应用（来自配置，可在 /admin 改），再起采样线程。
     # 只留 metrics 里那一个线程：两处各起一个会让采样节奏变成 1.5 秒。
     mx = cfg.get("metrics") or {}
-    metrics.configure(persist=bool(mx.get("persist")), hours=int(mx.get("hours") or 24))
+    mx.pop("persist", None)                                  # 旧版本留下的键，已不用
+    metrics.configure(hours=int(mx.get("hours") or 24), short=bool(mx.get("short")))
     metrics.ensure_sampler()
 
     srv = ThreadingHTTPServer((BIND, PORT), Handler)

@@ -12,13 +12,14 @@ import threading
 import time
 from collections import deque
 
-BUCKET_SECONDS = 60        # 历史按分钟聚合：3 秒一采，一分钟一个点
 HISTORY_HOURS = int(os.environ.get("PORTAL_METRICS_HOURS", "24") or 24)   # 窗口长度，可调
+SHORT_MODE = False
+_prev_bucket = 60         # True = 原始模式：3 秒一个点、120 点、只留 6 分钟
+BUCKET_SECONDS = 60        # 采样进桶的间隔：长模式 60 秒，原始模式 3 秒
 HISTORY_LEN = max(1, HISTORY_HOURS * 60)
 
-# 要不要把历史写进文件。默认关：只在内存里，重启清零。
-# 开了之后重启/机器重启都能接着上一次的曲线往下画（重启期间的空白补不上）。
-PERSIST = os.environ.get("PORTAL_METRICS_PERSIST", "0").strip().lower() in ("1", "true", "yes", "on")
+# 历史直接放 /run（内存盘）：服务重启能接着画，机器重启清空，不碰硬盘。
+PERSIST = True
 # 默认写到 /run（tmpfs，内存盘）：服务重启还在，机器重启就没，且不碰 SSD。
 # 要落到磁盘就显式给 PORTAL_METRICS_FILE 指到 /var/lib 之类的路径。
 PERSIST_FILE = os.path.expanduser(os.environ.get("PORTAL_METRICS_FILE", "") or
@@ -185,34 +186,39 @@ def ensure_sampler() -> None:
     threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
 
 
-def configure(persist: bool | None = None, hours: int | None = None) -> None:
-    """运行时改窗口长度 / 落盘开关（Web UI 的开关走这里）。
+def configure(hours: int | None = None, short: bool | None = None) -> None:
+    """运行时切换窗口长度 / 模式（Web UI 用）。
 
-    关掉落盘时会顺手删掉历史文件，免得下次打开把过期数据又读回来。
+    short=True 就是原来那套：3 秒一个点、120 个点、只看最近 6 分钟。
     """
-    global PERSIST, HISTORY_HOURS, HISTORY_LEN, history
+    global HISTORY_HOURS, HISTORY_LEN, BUCKET_SECONDS, SHORT_MODE, history, _prev_bucket
     if hours is not None:
         try:
             hours = max(1, min(24 * 7, int(hours)))
         except (TypeError, ValueError):
             hours = HISTORY_HOURS
         HISTORY_HOURS = hours
-        HISTORY_LEN = hours * 60
+    if short is not None:
+        SHORT_MODE = bool(short)
+    was = BUCKET_SECONDS
+    if SHORT_MODE:
+        BUCKET_SECONDS, HISTORY_LEN = 3, 120
+    else:
+        BUCKET_SECONDS, HISTORY_LEN = 60, max(1, HISTORY_HOURS * 60)
+    # 采样间隔变了就不混用旧点：一分钟一个点和三秒一个点混在一张图上会失真
+    if BUCKET_SECONDS != was:
+        history.clear()
+    _prev_bucket = BUCKET_SECONDS
     keep = list(history)[-HISTORY_LEN:]
     history = deque(keep, maxlen=HISTORY_LEN)
-    if persist is not None:
-        PERSIST = bool(persist)
-    if not PERSIST:
-        try:
-            os.remove(PERSIST_FILE)
-        except OSError:
-            pass
 
 
 def state() -> dict:
     """给页面显示用：当前窗口和开关状态。"""
-    return {"persist": bool(PERSIST), "hours": HISTORY_HOURS,
-            "points": len(history), "file": PERSIST_FILE}
+    span = int(history[-1]["ts"] - history[0]["ts"]) if len(history) > 1 else 0
+    return {"persist": bool(PERSIST), "hours": HISTORY_HOURS, "short": SHORT_MODE,
+            "bucket": BUCKET_SECONDS, "points": len(history), "span": span,
+            "file": PERSIST_FILE}
 
 
 def _save_history() -> None:
@@ -228,7 +234,7 @@ def _save_history() -> None:
         pass
     tmp = PERSIST_FILE + ".tmp"
     try:
-        payload = {"hours": HISTORY_HOURS, "saved": time.time(),
+        payload = {"hours": HISTORY_HOURS, "bucket": BUCKET_SECONDS, "saved": time.time(),
                    "buckets": [[b["ts"], round(b["cpu"], 2), round(b["mem_pct"], 2),
                                 round(b["rx_kbs"], 1), round(b["tx_kbs"], 1)] for b in history]}
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -254,6 +260,8 @@ def load_history() -> int:
         with open(PERSIST_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         cutoff = time.time() - HISTORY_LEN * BUCKET_SECONDS
+        if int(data.get("bucket") or BUCKET_SECONDS) != BUCKET_SECONDS:
+            return 0          # 模式和存档不一致（比如 6 分钟档 vs 24 小时档），就不混用
         rows = [r for r in data.get("buckets", []) if len(r) == 5 and r[0] >= cutoff]
         history.clear()
         for ts, cpu, mem, rx, tx in rows:
