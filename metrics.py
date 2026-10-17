@@ -19,8 +19,10 @@ HISTORY_LEN = max(1, HISTORY_HOURS * 60)
 # 要不要把历史写进文件。默认关：只在内存里，重启清零。
 # 开了之后重启/机器重启都能接着上一次的曲线往下画（重启期间的空白补不上）。
 PERSIST = os.environ.get("PORTAL_METRICS_PERSIST", "0").strip().lower() in ("1", "true", "yes", "on")
+# 默认写到 /run（tmpfs，内存盘）：服务重启还在，机器重启就没，且不碰 SSD。
+# 要落到磁盘就显式给 PORTAL_METRICS_FILE 指到 /var/lib 之类的路径。
 PERSIST_FILE = os.path.expanduser(os.environ.get("PORTAL_METRICS_FILE", "") or
-                                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics-history.json"))
+                                  "/run/lyco-portal/metrics-history.json")
 PERSIST_EVERY = 60.0
 _last_save = 0.0
 _last_cpu: tuple[int, int] | None = None   # (busy, total)
@@ -220,6 +222,10 @@ def _save_history() -> None:
     """
     if not PERSIST:
         return
+    try:
+        os.makedirs(os.path.dirname(PERSIST_FILE) or ".", exist_ok=True)
+    except OSError:
+        pass
     tmp = PERSIST_FILE + ".tmp"
     try:
         payload = {"hours": HISTORY_HOURS, "saved": time.time(),

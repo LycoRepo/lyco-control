@@ -158,10 +158,6 @@ $stats_strip
 
       const hist = Array.isArray(d.history) ? d.history : [];
       const n = hist.length;
-      const spanSec = Math.max(0, d.ts - (hist[0] ? hist[0].ts : d.ts));
-      const HOURS = d.hours || 24;                 // 窗口长度由后端给（PORTAL_METRICS_HOURS）
-      const t1 = d.ts, t0 = d.ts - HOURS * 3600;
-      const winSec = t1 - t0;
       const clock = ts => {
         const dt = new Date(ts * 1000);
         const hh = String(dt.getHours()).padStart(2, '0');
@@ -176,16 +172,6 @@ $stats_strip
         const h = sec / 3600;
         return (h >= 10 ? Math.round(h) : h.toFixed(1)) + ' 小时';
       };
-      $('span').textContent = n < 2 ? '刚启动，正在积累'
-        : '已积累 ' + human(spanSec) + ' / ' + HOURS + ' 小时';
-
-      const labels = [clock(t0), clock(Math.round((t0 + t1) / 2)), clock(t1)];
-      ['1', '2', '3'].forEach(k => {
-        $('ax-left-' + k).textContent = labels[0];
-        $('ax-mid-' + k).textContent = labels[1];
-        $('ax-right-' + k).textContent = labels[2];
-      });
-
       const lastTs = hist.length ? hist[hist.length - 1].ts : null;
       if (s.cpu.length === 0 && n) {
         hist.forEach(h => { push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs); });
@@ -194,6 +180,20 @@ $stats_strip
         const h = hist[hist.length - 1];
         push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs);
       }
+
+      // 横轴不预留未来：从第一个点画到最后一个点，跨度就是已存到的时间
+      const have = s.ts.length;
+      const t0 = have ? s.ts[0] : d.ts;
+      const t1 = have ? s.ts[have - 1] : d.ts;
+      const winSec = Math.max(0, t1 - t0);
+      const spanSec = winSec;
+      $('span').textContent = have < 2 ? '刚启动，正在积累' : '最近 ' + human(spanSec);
+      const labels = [clock(t0), clock(Math.round((t0 + t1) / 2)), clock(t1)];
+      ['1', '2', '3'].forEach(k => {
+        $('ax-left-' + k).textContent = labels[0];
+        $('ax-mid-' + k).textContent = labels[1];
+        $('ax-right-' + k).textContent = labels[2];
+      });
 
       draw($('c-cpu'), [{ data: s.cpu, ts: s.ts, max: 100, color: '#e05a72', fill: 'rgba(224,90,114,0.12)' }], 100, '%', t0, t1);
       draw($('c-mem'), [{ data: s.mem, ts: s.ts, max: 100, color: '#6ea8fe', fill: 'rgba(110,168,254,0.10)' }], 100, '%', t0, t1);
