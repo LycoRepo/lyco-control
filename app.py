@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from string import Template
 from urllib.parse import parse_qs, quote, urlparse
 
+import metrics
 import service_status
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -242,6 +243,25 @@ def safe_next(target: str) -> bool:
     return "://" not in target and "\r" not in target and "\n" not in target
 
 
+def stats_strip() -> str:
+    """首页顶部的资源概览：四个数字 + 进详情页的入口。"""
+    try:
+        m = metrics.last()
+    except Exception:
+        return ""
+    cells = [
+        ("CPU", "{:.0f}<span class=\"u\">%</span>".format(m["cpu"])),
+        ("内存", "{:.0f}<span class=\"u\">%</span>".format(m["mem_pct"])),
+        ("磁盘", "{:.0f}<span class=\"u\">%</span>".format(m["disk"]["pct"])),
+        ("负载", "{:.2f}".format(m["load"][0])),
+    ]
+    body = "".join('<div class="stat-strip-item"><span class="k">{}</span>'
+                   '<span class="v">{}</span></div>'.format(k, v) for k, v in cells)
+    return ('<section class="stat-strip" aria-label="资源占用">'
+            + body
+            + '<a class="stat-strip-link" href="/stats">详情 →</a></section>')
+
+
 def brand_mark(title: str) -> str:
     """品牌标记：标题的第一个有效字符（中文取首字，英文自动大写），都是标点/空白就退回 L。"""
     core = re.sub(r"^[^\w\u4e00-\u9fff]+", "", (title or "").strip())
@@ -428,10 +448,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/login?next=" + quote(self.path))
         if path == "/":
             return self._send(self.render("index.html", cards=cards_html(probe_all(self.cfg["services"])),
+                                     stats_strip=stats_strip(),
                                      when=time.strftime("%Y-%m-%d %H:%M:%S")))
         if path == "/admin":
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                      msg_block="", path=CFG_PATH))
+        if path == "/stats":
+            return self._send(self.render("stats.html"))
+        if path == "/api/metrics":
+            return self._send(json.dumps(metrics.sample(), ensure_ascii=False).encode("utf-8"),
+                              200, "application/json; charset=utf-8",
+                              extra=["Cache-Control: no-store"])
         if path == "/detail":
             qs = parse_qs(urlparse(self.path).query)
             key = (qs.get("id") or [""])[0]
@@ -739,6 +766,17 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     cfg = load_config()
     Handler.cfg = cfg
+    # 后台采样：页面不打开也在攒历史，打开时立刻就有趋势可看（读 /proc，开销可忽略）
+    def _sampler() -> None:
+        while True:
+            try:
+                metrics.sample()
+            except Exception:
+                pass
+            time.sleep(3)
+
+    threading.Thread(target=_sampler, daemon=True).start()
+
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     print("panel-gate on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
     if COOKIE_DOMAIN and not SECURE_COOKIE:
