@@ -118,7 +118,7 @@ a,button,input{touch-action:manipulation}
 .auth-title{margin:0 0 7px;font-size:23px;line-height:1.35;font-weight:650;letter-spacing:-.025em}
 .auth-sub{margin:0 0 25px;color:var(--muted);font-size:14px}
 .stack{display:flex;flex-direction:column;gap:17px}
-.stack.narrow{width:100%;max-width:400px}
+.stack.narrow{width:100%;max-width:520px}
 .field{display:flex;flex-direction:column;gap:7px;min-width:0}
 .field-label{color:var(--muted);font-size:13px;font-weight:500}
 input[type=password],input[type=text],input[type=url],input:not([type]){
@@ -177,11 +177,7 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
 .table .center,.center{text-align:center}
 .table-help{display:none;margin:10px 0 0;color:var(--muted);font-size:12px}
 .row-actions{display:flex;align-items:center;gap:12px;margin-top:18px}
-.row-actions .primary{margin-left:auto;min-width:126px}
-.password-panel{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,400px);align-items:start;gap:36px}
-.password-panel .panel-hint{max-width:340px}
-.password-panel .stack{justify-self:end}
-.password-panel .btn{align-self:flex-start;min-width:126px;margin-top:3px}
+.row-actions .primary{min-width:126px}   /* 和其他面板一致：按钮留在左边，不甩到最右 */
 @media (hover:hover) and (pointer:fine){
   .navlink:hover{background:var(--panel-raised);color:var(--text)}
   .card:hover{transform:translateY(-3px);border-color:var(--accent);background-color:#231a24;box-shadow:0 12px 30px rgba(0,0,0,.2),0 0 0 1px rgba(224,90,114,.08)}
@@ -195,7 +191,6 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
   .card{padding:19px;gap:12px}
   .card-icon{flex-basis:40px;width:40px;min-height:40px;font-size:21px}
   .panel{padding:22px}
-  .password-panel{gap:24px}
 }
 @media (max-width:680px){
   .bar-inner{padding:10px 20px;gap:12px}
@@ -205,9 +200,6 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
   .card{min-height:112px;padding:20px;gap:14px}
   .admin-wrap{padding-top:22px}
   .panel{padding:20px;margin-bottom:16px}
-  .password-panel{grid-template-columns:minmax(0,1fr);gap:0}
-  .password-panel .stack{max-width:none;justify-self:stretch}
-  .password-panel .panel-hint{max-width:none}
   .table-help{display:block}
   .table td input:not([type=checkbox]){font-size:16px;min-height:44px}
   .table td{padding-top:10px;padding-bottom:10px}
@@ -232,7 +224,6 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
   .panel{padding:18px 14px}
   .row-actions{gap:10px}
   .row-actions .btn{flex:1;min-width:0;padding-right:10px;padding-left:10px}
-  .password-panel .btn{align-self:stretch}
 }
 @media (max-width:340px){
   .bar-inner{flex-wrap:wrap}
@@ -297,3 +288,14 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
 .check{display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--text);line-height:1.5;cursor:pointer}
 .check input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;flex:none}
 .check + .panel-hint{margin-top:2px}
+
+/* 资源设置：一行一个控件，左边缘统一，别一会儿左一会儿右 */
+.settings{display:flex;flex-direction:column;align-items:stretch;gap:14px;width:100%;max-width:520px}
+.settings-row{display:flex;align-items:center;gap:10px}
+.settings-label{color:var(--muted);font-size:13px;font-weight:500;min-width:64px}
+.settings-input{width:84px;min-height:38px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;
+  background:var(--input);color:var(--text);font-size:14px;font-variant-numeric:tabular-nums;text-align:center}
+.settings-input:focus{border-color:var(--accent)}
+.settings-unit{color:var(--muted);font-size:13px}
+.settings-note{margin:0;color:var(--muted);font-size:12.5px;line-height:1.6}
+.settings .check{font-size:13.5px}

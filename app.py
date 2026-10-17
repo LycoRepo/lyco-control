@@ -306,23 +306,28 @@ def status_text(up, detail: str = "", ms=None) -> str:
 
 
 def metrics_block_html(cfg: dict) -> str:
+    """资源设置表单：一行数值、一行开关、一行状态、一个按钮，左边缘统一。"""
     mx = cfg.get("metrics") or {}
     checked = " checked" if mx.get("persist") else ""
     hours = mx.get("hours", 24)
     st = metrics.state()
-    # 注意用词：这些数据放 /run（内存盘），全程不写磁盘，别叫它"落盘"。
-    note = ("当前：存在 /run 内存盘（不写磁盘，机器重启会清空）· 共 {} 点".format(st["points"])
-            if st["persist"] else "当前：只在进程内存里 · 共 {} 点（服务一重启就清零）".format(st["points"]))
+    # 用词注意：数据放 /run（内存盘），不写磁盘，别叫"落盘"。
+    where = ("存在 /run 内存盘（不写磁盘），机器重启会清空" if st["persist"]
+             else "只在进程内存里，服务一重启就清零")
     return (
-        '<form method="post" action="/admin/metrics" class="stack narrow">'
-        '<label class="field"><span class="field-label">保留时长（小时）</span>'
-        '<input type="number" name="hours" min="1" max="168" step="1" value="{}" required></label>'
+        '<form method="post" action="/admin/metrics" class="settings">'
+        '<div class="settings-row">'
+        '<label class="settings-label" for="mx-hours">保留时长</label>'
+        '<input class="settings-input" id="mx-hours" type="number" name="hours" '
+        'min="1" max="168" step="1" value="{}" required>'
+        '<span class="settings-unit">小时</span>'
+        '</div>'
         '<label class="check"><input type="checkbox" name="persist" value="1"{}> '
-        '服务重启后接着画（存 /run 内存盘，不写磁盘；机器重启清空）</label>'
-        '<p class="panel-hint">{}</p>'
-        '<button type="submit" class="btn primary">保存资源设置</button>'
+        '服务重启后接着画</label>'
+        '<p class="settings-note">{} · 当前共 {} 个点</p>'
+        '<button type="submit" class="btn primary">保存</button>'
         '</form>'
-    ).format(hours, checked, note)
+    ).format(hours, checked, where, st["points"])
 
 
 def cards_html(services: list[dict]) -> str:
