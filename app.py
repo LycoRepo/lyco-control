@@ -70,6 +70,8 @@ DEFAULT_CONFIG = {
     "session_epoch": "",
     "setup_token": "",
     "title": TITLE,
+    # 资源曲线：窗口长度（小时）与「重启后是否接着画」。UI 里能改，这里只是默认值。
+    "metrics": {"persist": False, "hours": 24},
     "services": [
         # 一个卡片 = 一个入口。url 是点进去的地址（可用 https://… 或站内 /detail?id=xxx）。
         # check 是服务端探活的地址（建议指向 127.0.0.1 上的真实端口）。
@@ -303,6 +305,25 @@ def status_text(up, detail: str = "", ms=None) -> str:
     return "未检查"
 
 
+def metrics_block_html(cfg: dict) -> str:
+    mx = cfg.get("metrics") or {}
+    checked = " checked" if mx.get("persist") else ""
+    hours = mx.get("hours", 24)
+    st = metrics.state()
+    note = ("当前：落盘（文件 {}，共 {} 点）".format(html_mod.escape(st["file"]), st["points"])
+            if st["persist"] else "当前：只在内存，重启即清零（共 {} 点）".format(st["points"]))
+    return (
+        '<form method="post" action="/admin/metrics" class="stack narrow">'
+        '<label class="field"><span class="field-label">保留时长（小时）</span>'
+        '<input type="number" name="hours" min="1" max="168" step="1" value="{}" required></label>'
+        '<label class="check"><input type="checkbox" name="persist" value="1"{}> '
+        '重启后接着画（写文件，约每点 30 字节/分钟一次覆盖）</label>'
+        '<p class="panel-hint">{}</p>'
+        '<button type="submit" class="btn primary">保存资源设置</button>'
+        '</form>'
+    ).format(hours, checked, note)
+
+
 def cards_html(services: list[dict]) -> str:
     rows = []
     for svc in services:
@@ -450,7 +471,8 @@ class Handler(BaseHTTPRequestHandler):
                                      when=time.strftime("%Y-%m-%d %H:%M:%S")))
         if path == "/admin":
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
-                                     msg_block="", path=CFG_PATH))
+                                     msg_block="", path=CFG_PATH,
+                                     metrics_block=metrics_block_html(self.cfg)))
         if path == "/stats":
             return self._redirect("/")      # 资源已经并在首页，旧书签回到首页
         if path == "/api/metrics":
@@ -547,6 +569,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/admin")
         if path == "/admin/services":
             return self._save_services(form)
+        if path == "/admin/metrics":
+            try:
+                hours = int(form.get("hours") or 24)
+            except ValueError:
+                hours = 24
+            hours = max(1, min(168, hours))
+            persist = (form.get("persist") or "") not in ("", "0", "off", "false")
+            with CFG_LOCK:
+                self.cfg.setdefault("metrics", {})
+                self.cfg["metrics"]["hours"] = hours
+                self.cfg["metrics"]["persist"] = persist
+                save_config(self.cfg)
+            metrics.configure(persist=persist, hours=hours)
+            return self._redirect("/admin")
         if path == "/admin/password":
             return self._save_password(form)
         return self._send(b"<h1>404</h1>", 404)
@@ -767,19 +803,13 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     cfg = load_config()
     Handler.cfg = cfg
-    # 后台采样：页面不打开也在攒历史，打开时立刻就有趋势可看（读 /proc，开销可忽略）
-    def _sampler() -> None:
-        while True:
-            try:
-                metrics.sample()
-            except Exception:
-                pass
-            time.sleep(3)
-
-    threading.Thread(target=_sampler, daemon=True).start()
+    # 窗口长度与落盘开关先应用（来自配置，可在 /admin 改），再起采样线程。
+    # 只留 metrics 里那一个线程：两处各起一个会让采样节奏变成 1.5 秒。
+    mx = cfg.get("metrics") or {}
+    metrics.configure(persist=bool(mx.get("persist")), hours=int(mx.get("hours") or 24))
+    metrics.ensure_sampler()
 
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
-    metrics.ensure_sampler()      # 开机就开始按固定节奏记历史，不必等有人访问
     print("lyco-control on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
     if COOKIE_DOMAIN and not SECURE_COOKIE:
         print("警告：PORTAL_COOKIE_DOMAIN={} 但 PORTAL_SECURE=0 —— 上 HTTPS 后务必改成 1"

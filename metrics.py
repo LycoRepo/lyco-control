@@ -183,6 +183,36 @@ def ensure_sampler() -> None:
     threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
 
 
+def configure(persist: bool | None = None, hours: int | None = None) -> None:
+    """运行时改窗口长度 / 落盘开关（Web UI 的开关走这里）。
+
+    关掉落盘时会顺手删掉历史文件，免得下次打开把过期数据又读回来。
+    """
+    global PERSIST, HISTORY_HOURS, HISTORY_LEN, history
+    if hours is not None:
+        try:
+            hours = max(1, min(24 * 7, int(hours)))
+        except (TypeError, ValueError):
+            hours = HISTORY_HOURS
+        HISTORY_HOURS = hours
+        HISTORY_LEN = hours * 60
+    keep = list(history)[-HISTORY_LEN:]
+    history = deque(keep, maxlen=HISTORY_LEN)
+    if persist is not None:
+        PERSIST = bool(persist)
+    if not PERSIST:
+        try:
+            os.remove(PERSIST_FILE)
+        except OSError:
+            pass
+
+
+def state() -> dict:
+    """给页面显示用：当前窗口和开关状态。"""
+    return {"persist": bool(PERSIST), "hours": HISTORY_HOURS,
+            "points": len(history), "file": PERSIST_FILE}
+
+
 def _save_history() -> None:
     """把分钟桶写成一个紧凑数组文件；失败只吞掉，不影响采样。
 
