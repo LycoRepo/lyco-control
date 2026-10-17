@@ -342,7 +342,7 @@ def stats_strip() -> str:
     ]
     body = "".join('<div class="stat-strip-item"><span class="k">{}</span>'
                    '<span class="v">{}</span></div>'.format(k, v) for k, v in cells)
-    return '<section class="stat-strip" aria-label="资源指标概览">' + body + '</section>'
+    return '<section class="stat-strip" aria-label="资源概览">' + body + '</section>'
 
 
 def brand_mark(title: str) -> str:
@@ -399,7 +399,7 @@ def metrics_block_html(cfg: dict) -> str:
     st = metrics.state()
     sec = st.get("span") or 0
     if st["points"] < 2:
-        headline = "正在收集指标"
+        headline = "正在收集数据"
     elif sec < 90:
         headline = "已记录 {} 秒".format(sec)
     elif sec < 5400:
@@ -419,7 +419,7 @@ def metrics_block_html(cfg: dict) -> str:
         '<label class="check"><input type="checkbox" name="short" value="1"{}> '
         '仅保留最近 6 分钟（每 3 秒采样）</label>'
         '<p class="settings-note">{}</p>'
-        '<button type="submit" class="btn primary">保存指标设置</button>'
+        '<button type="submit" class="btn primary">保存资源设置</button>'
         '</form>'
     ).format(hours, short_checked, note)
 
