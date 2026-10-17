@@ -2,17 +2,21 @@
 
 设计取舍：
 - CPU / 网络是「两次采样的差值」，所以进程内保留上一次的时间戳；
-- 历史默认只在内存环形缓冲里，进程重启即清空；PORTAL_METRICS_PERSIST=1 时才写到文件。
+- 历史使用内存环形缓冲，并定期原子保存到 /run；服务重启可恢复，机器重启清空。
 """
 from __future__ import annotations
 
 import json
+import copy
+import math
 import os
+import tempfile
 import threading
 import time
 from collections import deque
+from functools import wraps
 
-HISTORY_HOURS = int(os.environ.get("PORTAL_METRICS_HOURS", "24") or 24)   # 窗口长度，可调
+HISTORY_HOURS = max(1, min(168, int(os.environ.get("PORTAL_METRICS_HOURS", "24") or 24)))
 SHORT_MODE = False
 _prev_bucket = 60         # True = 原始模式：3 秒一个点、120 点、只留 6 分钟
 BUCKET_SECONDS = 60        # 采样进桶的间隔：长模式 60 秒，原始模式 3 秒
@@ -27,16 +31,35 @@ PERSIST_FILE = os.path.expanduser(os.environ.get("PORTAL_METRICS_FILE", "") or
 PERSIST_EVERY = 60.0
 _last_save = 0.0
 _last_cpu: tuple[int, int] | None = None   # (busy, total)
-_last_net: tuple[float, int, int] | None = None  # (monotonic, rx, tx)
+_last_net: tuple[float, dict[str, tuple[int, int]]] | None = None
 _last_sample_ts = 0.0
 _latest: dict | None = None
 _last_ok = 0.0
 _last_error: str | None = None
 _svc_ok = 0.0
 _svc_error: str | None = None
+_persist_error: str | None = None
 
 history: deque[dict] = deque(maxlen=HISTORY_LEN)
-_lock = threading.Lock()          # 保护 history / _prev_cg / _latest_services
+_lock = threading.RLock()          # 仅保护快照与历史发布，不在此锁内执行磁盘采样
+_sampling_lock = threading.RLock()  # 串行化采样基线与模式切换；总在快照锁之前获取
+_start_lock = threading.Lock()
+
+
+def _serialized(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _sampling_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _snapshot_locked(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _lock:
+            return fn(*args, **kwargs)
+    return wrapped
 
 
 def _read(path: str) -> str:
@@ -61,8 +84,8 @@ def _meminfo() -> dict[str, int]:
     return out
 
 
-def _net_bytes() -> tuple[int, int]:
-    rx = tx = 0
+def _net_bytes() -> dict[str, tuple[int, int]]:
+    counters = {}
     for line in _read("/proc/net/dev").splitlines()[2:]:
         iface, _, data = line.partition(":")
         name = iface.strip()
@@ -70,11 +93,11 @@ def _net_bytes() -> tuple[int, int]:
         if name == "lo" or name.startswith(("veth", "docker", "br-", "virbr")):
             continue
         cols = data.split()
-        rx += int(cols[0])
-        tx += int(cols[8])
-    return rx, tx
+        counters[name] = (int(cols[0]), int(cols[8]))
+    return counters
 
 
+@_serialized
 def sample() -> dict:
     """采一次样，返回当前值（同时把历史推入环形缓冲）。"""
     global _last_cpu, _last_net, _last_sample_ts, _latest
@@ -91,7 +114,9 @@ def sample() -> dict:
 
     mi = _meminfo()
     total_kb = mi.get("MemTotal", 0)
-    avail_kb = mi.get("MemAvailable", mi.get("MemFree", 0))
+    avail_kb = min(total_kb, max(0, mi.get("MemAvailable", mi.get("MemFree", 0)
+                                        + mi.get("Buffers", 0) + mi.get("Cached", 0)
+                                        + mi.get("SReclaimable", 0) - mi.get("Shmem", 0))))
     used_kb = max(0, total_kb - avail_kb)
     swap_total_kb = mi.get("SwapTotal", 0)
     swap_free_kb = mi.get("SwapFree", 0)
@@ -100,20 +125,22 @@ def sample() -> dict:
     st = os.statvfs("/")
     disk_total = st.f_blocks * st.f_frsize
     disk_free = st.f_bavail * st.f_frsize
-    disk_used = disk_total - disk_free
+    disk_used = max(0, disk_total - st.f_bfree * st.f_frsize)
+    disk_available_total = disk_used + disk_free
 
-    rx, tx = _net_bytes()
+    counters = _net_bytes()
     rx_kbs = tx_kbs = 0.0
     mono = time.monotonic()
     if _last_net is not None:
         dt = mono - _last_net[0]
-        # 网卡重建/计数器回绕会让 rx 变小，这时只重置基线，不报负数
-        if rx < _last_net[1] or tx < _last_net[2]:
-            dt = 0.0
         if dt > 0.5:
-            rx_kbs = (rx - _last_net[1]) / 1024.0 / dt
-            tx_kbs = (tx - _last_net[2]) / 1024.0 / dt
-    _last_net = (mono, rx, tx)
+            # 新增接口先建立基线；消失或重置的接口不能抵消其他接口的增量。
+            for name, (rx, tx) in counters.items():
+                prev = _last_net[1].get(name)
+                if prev is not None:
+                    rx_kbs += max(0, rx - prev[0]) / 1024.0 / dt
+                    tx_kbs += max(0, tx - prev[1]) / 1024.0 / dt
+    _last_net = (mono, counters)
 
     load1, load5, load15 = os.getloadavg()
     uptime_s = float(_read("/proc/uptime").split()[0])
@@ -130,6 +157,12 @@ def sample() -> dict:
     # 写进当前这一分钟的桶：同一分钟内的采样做平均，跨分钟才新增一个点
     minute = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
     with _lock:
+        cutoff = now - HISTORY_LEN * BUCKET_SECONDS
+        # 时钟回拨时舍弃未来桶；长时间暂停后按时间淘汰，而非只按点数淘汰。
+        while history and history[-1]["ts"] > minute:
+            history.pop()
+        while history and history[0]["ts"] < cutoff:
+            history.popleft()
         if history and history[-1]["ts"] == minute:
             b = history[-1]
             n = b["n"] + 1
@@ -141,7 +174,7 @@ def sample() -> dict:
         else:
             history.append({"ts": minute, "cpu": item["cpu"], "mem_pct": item["mem_pct"],
                             "rx_kbs": item["rx_kbs"], "tx_kbs": item["tx_kbs"], "n": 1})
-    _maybe_save(now)
+    _maybe_save(mono)
 
     result = {
         **item,
@@ -159,15 +192,16 @@ def sample() -> dict:
             "total_gb": round(disk_total / 1024 ** 3, 1),
             "used_gb": round(disk_used / 1024 ** 3, 1),
             "free_gb": round(disk_free / 1024 ** 3, 1),
-            "pct": round(100.0 * disk_used / disk_total, 1) if disk_total else 0.0,
+            "pct": round(100.0 * disk_used / disk_available_total, 1) if disk_available_total else 0.0,
         },
         "history": _history_snapshot(),
     }
     global _last_ok, _last_error
-    _latest = result
-    _last_ok = now
-    _last_error = None
-    return result
+    with _lock:
+        _latest = result
+        _last_ok = time.monotonic()
+        _last_error = None
+    return copy.deepcopy(result)
 
 
 SAMPLER_INTERVAL = 3.0     # 后端自己按这个节奏采样，与有多少客户端访问无关
@@ -176,16 +210,19 @@ _sampler_started = False
 
 def _sampler_loop() -> None:
     while True:
+        started = time.monotonic()
         global _last_error, _svc_error
         try:
             sample()
         except Exception as exc:
-            _last_error = "{}: {}".format(type(exc).__name__, str(exc)[:120])
+            with _lock:
+                _last_error = type(exc).__name__
         try:
             services()          # cgroup 基线也走固定节奏，多客户端不会互相干扰
         except Exception as exc:
-            _svc_error = "{}: {}".format(type(exc).__name__, str(exc)[:120])
-        time.sleep(SAMPLER_INTERVAL)
+            with _lock:
+                _svc_error = type(exc).__name__
+        time.sleep(max(0.1, SAMPLER_INTERVAL - (time.monotonic() - started)))
 
 
 def ensure_sampler() -> None:
@@ -195,13 +232,16 @@ def ensure_sampler() -> None:
     或者有人直接 curl 接口，点数攒得比时间快，120 个点只覆盖两三分钟。
     """
     global _sampler_started
-    if _sampler_started:
-        return
-    _sampler_started = True
-    load_history()
-    threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
+    with _start_lock:
+        if _sampler_started:
+            return
+        load_history()
+        threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
+        _sampler_started = True
 
 
+@_serialized
+@_snapshot_locked
 def configure(hours: int | None = None, short: bool | None = None) -> None:
     """运行时切换窗口长度 / 模式（Web UI 用）。
 
@@ -229,6 +269,7 @@ def configure(hours: int | None = None, short: bool | None = None) -> None:
     history = deque(keep, maxlen=HISTORY_LEN)
 
 
+@_snapshot_locked
 def state() -> dict:
     """给页面显示用：当前窗口和开关状态。"""
     span = int(history[-1]["ts"] - history[0]["ts"]) if len(history) > 1 else 0
@@ -237,27 +278,37 @@ def state() -> dict:
             "file": PERSIST_FILE}
 
 
+@_serialized
 def _save_history() -> None:
-    """把分钟桶写成一个紧凑数组文件；失败只吞掉，不影响采样。
+    """把分钟桶写成紧凑数组文件；失败标记降级，不中断采样。
 
     开关关掉时直接返回——这道判断必须写在函数里面，不能只靠调用方自觉。
     """
     if not PERSIST:
         return
+    global _persist_error
+    tmp = None
     try:
         os.makedirs(os.path.dirname(PERSIST_FILE) or ".", exist_ok=True)
-    except OSError:
-        pass
-    tmp = PERSIST_FILE + ".tmp"
-    try:
-        payload = {"hours": HISTORY_HOURS, "bucket": BUCKET_SECONDS, "saved": time.time(),
-                   "buckets": [[b["ts"], round(b["cpu"], 2), round(b["mem_pct"], 2),
-                                round(b["rx_kbs"], 1), round(b["tx_kbs"], 1)] for b in history]}
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with _lock:
+            payload = {"hours": HISTORY_HOURS, "bucket": BUCKET_SECONDS, "saved": time.time(),
+                       "buckets": [[b["ts"], round(b["cpu"], 2), round(b["mem_pct"], 2),
+                                    round(b["rx_kbs"], 1), round(b["tx_kbs"], 1)] for b in history]}
+        fd, tmp = tempfile.mkstemp(prefix=".metrics-", suffix=".tmp",
+                                   dir=os.path.dirname(os.path.abspath(PERSIST_FILE)))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, PERSIST_FILE)
-    except Exception:
-        pass
+        with _lock:
+            _persist_error = None
+    except OSError as exc:
+        with _lock:
+            _persist_error = "指标历史保存失败：" + type(exc).__name__
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _maybe_save(now: float) -> None:
@@ -268,20 +319,35 @@ def _maybe_save(now: float) -> None:
     _save_history()
 
 
+@_serialized
+@_snapshot_locked
 def load_history() -> int:
     """启动时读回落盘的历史，丢掉超出窗口的点。返回读回的点数。开关关掉时直接 0。"""
     if not PERSIST:
         return 0
     try:
+        if os.path.getsize(PERSIST_FILE) > 4 * 1024 * 1024:
+            return 0
         with open(PERSIST_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        cutoff = time.time() - HISTORY_LEN * BUCKET_SECONDS
+        now = time.time()
+        cutoff = now - HISTORY_LEN * BUCKET_SECONDS
         if int(data.get("bucket") or BUCKET_SECONDS) != BUCKET_SECONDS:
             return 0          # 模式和存档不一致（比如 6 分钟档 vs 24 小时档），就不混用
-        rows = [r for r in data.get("buckets", []) if len(r) == 5 and r[0] >= cutoff]
+        rows = []
+        for r in data.get("buckets", []):
+            if (not isinstance(r, list) or len(r) != 5
+                    or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in r)):
+                continue
+            if cutoff <= r[0] <= now and 0 <= r[1] <= 100 and 0 <= r[2] <= 100 and r[3] >= 0 and r[4] >= 0:
+                rows.append(r)
+        rows.sort(key=lambda r: r[0])
         history.clear()
         for ts, cpu, mem, rx, tx in rows:
-            history.append({"ts": int(ts), "cpu": cpu, "mem_pct": mem,
+            bucket = int(ts // BUCKET_SECONDS) * BUCKET_SECONDS
+            if history and history[-1]["ts"] == bucket:
+                history.pop()
+            history.append({"ts": bucket, "cpu": cpu, "mem_pct": mem,
                             "rx_kbs": rx, "tx_kbs": tx, "n": 1})
         return len(history)
     except Exception:
@@ -295,20 +361,23 @@ def _history_snapshot() -> list[dict]:
                 for b in history]
 
 
+@_snapshot_locked
 def last() -> dict:
-    """取最近一次采样结果；还没采过就现采一次。不推进历史（页面渲染用）。"""
+    """取最近一次采样结果；首次尚无结果时报告不可用，不在请求线程采样。"""
     if _latest is None:
-        return sample()
-    data = dict(_latest)
-    now = time.time()
+        raise RuntimeError("正在收集指标")
+    data = copy.deepcopy(_latest)
+    data["history"] = _history_snapshot()
+    data["hours"] = HISTORY_HOURS
+    now = time.monotonic()
     host_age = now - _last_ok if _last_ok else None
     svc_age = now - _svc_ok if _svc_ok else None
     data["degraded"] = (
-        bool(_last_error) or bool(_svc_error)
+        bool(_last_error) or bool(_svc_error) or bool(_persist_error)
         or (host_age is not None and host_age > 15)
         or (svc_age is not None and svc_age > 20)
     )
-    err = _last_error or _svc_error
+    err = _last_error or _svc_error or _persist_error
     if err:
         data["error"] = err
     return data
@@ -330,7 +399,7 @@ def _read_int(path: str) -> int:
         return 0
 
 
-def _cg_cpu_usec(directory: str) -> int:
+def _cg_cpu_usec(directory: str) -> int | None:
     try:
         with open(os.path.join(directory, "cpu.stat"), "r", encoding="utf-8") as fh:
             for line in fh:
@@ -338,24 +407,25 @@ def _cg_cpu_usec(directory: str) -> int:
                     return int(line.split()[1])
     except Exception:
         pass
-    return 0
+    return None
 
 
 def _container_names() -> dict[str, str]:
     try:
         with open(NAMES_PATH, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
+            return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
     except Exception:
         return {}
 
 
+@_snapshot_locked
 def last_services(limit: int = 8) -> list[dict]:
     """读最近一次采样算出来的服务占用（不推进 cgroup 基线）。"""
-    if not _latest_services:
-        return services(limit)
-    return _latest_services[:limit]
+    return copy.deepcopy(_latest_services[:limit])
 
 
+@_serialized
 def services(limit: int = 8) -> list[dict]:
     """按 cgroup 统计每个服务/容器的内存与 CPU 占用，按内存降序取前 limit 个。
 
@@ -368,7 +438,8 @@ def services(limit: int = 8) -> list[dict]:
     try:
         entries = os.listdir(CGROUP_ROOT)
     except OSError as exc:
-        _svc_error = "listdir: {}".format(type(exc).__name__)
+        with _lock:
+            _svc_error = "服务指标暂不可用：" + type(exc).__name__
         return []
 
     total_mb = _meminfo().get("MemTotal", 0) / 1024.0 or 1.0
@@ -395,31 +466,34 @@ def services(limit: int = 8) -> list[dict]:
         usec = _cg_cpu_usec(directory)
         prev = _prev_cg.get(entry)
         cpu_pct = 0.0
-        if prev is not None:
+        if prev is not None and usec is not None:
             dt = now - prev[0]
             delta = usec - prev[1]
             if delta < 0:                     # 容器重建，计数器归零
                 dt, delta = 0.0, 0
             if dt > 0.2:
                 cpu_pct = max(0.0, delta / 1e6 / dt / cores * 100.0)
-        _prev_cg[entry] = (now, usec)
+        if usec is not None:
+            _prev_cg[entry] = (now, usec)
+        else:
+            _prev_cg.pop(entry, None)
 
         mem_mb = round(mem / 1048576.0, 1)
         rows.append({
             "name": label,
             "kind": kind,
             "mem_mb": mem_mb,
-            "mem_pct": round(100.0 * mem_mb / total_mb, 1),
-            "cpu": round(min(cpu_pct, 100.0 * cores), 1),
+            "mem_pct": round(100.0 * (mem / 1048576.0) / total_mb, 1),
+            "cpu": round(min(cpu_pct, 100.0), 1),
         })
 
     rows.sort(key=lambda r: r["mem_mb"], reverse=True)
     with _lock:
-        _latest_services = rows[:limit]
-        _svc_ok = time.time()
+        _latest_services = rows
+        _svc_ok = time.monotonic()
         _svc_error = None
         # 已经消失的 cgroup 不要把基线一直留着，否则字典只增不减
         alive = set(entries)
         for key in [k for k in _prev_cg if k not in alive]:
             _prev_cg.pop(key, None)
-    return rows[:limit]
+    return copy.deepcopy(rows[:limit])

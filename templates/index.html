@@ -37,22 +37,22 @@ $stats_strip
   <section class="panel" aria-labelledby="chart-title">
     <div class="panel-heading">
       <h2 class="panel-title" id="chart-title">指标趋势</h2>
-      <p class="panel-hint"><span id="span">最近 6 分钟</span> · <span id="stamp">—</span></p>
+      <p class="panel-hint"><span id="span">正在收集指标</span> · <span id="stamp" role="status">—</span></p>
     </div>
     <div class="chart-row three">
       <div class="chart-box">
         <p class="chart-title">CPU 使用率（%）</p>
-        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-1">—</span><span id="y-mid-1">—</span><span id="y-bot-1">0</span></div><canvas id="c-cpu" height="120"></canvas></div>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-1">—</span><span id="y-mid-1">—</span><span id="y-bot-1">0</span></div><canvas id="c-cpu" height="120" role="img" aria-label="CPU 使用率趋势">请查看资源概览数值。</canvas></div>
         <p class="chart-axis"><span id="ax-left-1">—</span><span id="ax-mid-1">—</span><span id="ax-right-1">现在</span></p>
       </div>
       <div class="chart-box">
         <p class="chart-title">内存使用率（%）</p>
-        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-2">—</span><span id="y-mid-2">—</span><span id="y-bot-2">0</span></div><canvas id="c-mem" height="120"></canvas></div>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-2">—</span><span id="y-mid-2">—</span><span id="y-bot-2">0</span></div><canvas id="c-mem" height="120" role="img" aria-label="内存使用率趋势">请查看资源概览数值。</canvas></div>
         <p class="chart-axis"><span id="ax-left-2">—</span><span id="ax-mid-2">—</span><span id="ax-right-2">现在</span></p>
       </div>
       <div class="chart-box">
-        <p class="chart-title">网络速率（KB/s）</p>
-        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-3">—</span><span id="y-mid-3">—</span><span id="y-bot-3">0</span></div><canvas id="c-net" height="120"></canvas></div>
+        <p class="chart-title">网络速率（KiB/s）</p>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-3">—</span><span id="y-mid-3">—</span><span id="y-bot-3">0</span></div><canvas id="c-net" height="120" role="img" aria-label="网络速率趋势">请查看资源概览数值。</canvas></div>
         <p class="chart-axis"><span id="ax-left-3">—</span><span id="ax-mid-3">—</span><span id="ax-right-3">现在</span></p>
         <p class="chart-legend"><span class="lg lg-rx"></span>下行 <span class="lg lg-tx"></span>上行</p>
       </div>
@@ -130,34 +130,44 @@ $stats_strip
       ctx.fillStyle = x.fill; ctx.fill();
     });
   }
-  function push(a, v) { a.push(v); if (a.length > 4320) a.shift(); }   // 上限留够（最多 72 小时），实际窗口跟随后端
-
   function renderServices(list) {
     const tb = $('svc-rows');
-    if (!Array.isArray(list) || !list.length) return;
+    if (!Array.isArray(list) || !list.length) {
+      tb.innerHTML = '<tr><td colspan="3">暂无服务指标</td></tr>';
+      return;
+    }
+    const escapeText = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
     const maxMem = Math.max.apply(null, list.map(x => x.mem_mb).concat([1]));
     tb.innerHTML = list.map(x => {
       const pct = Math.max(2, Math.round(100 * x.mem_mb / maxMem));
-      const cpu = x.cpu > 0 ? x.cpu.toFixed(1) + '%' : '—';
+      const cpu = x.cpu.toFixed(1) + '%';
       const mem = x.mem_mb.toFixed(1) + ' MB · ' + (x.mem_pct ?? 0).toFixed(1) + '%';
       const kind = x.kind === 'container' ? '容器' : '服务';
-      return '<tr><td><span class="svc-name">' + x.name + '</span><span class="svc-kind">' + kind + '</span>'
+      return '<tr><td><span class="svc-name">' + escapeText(x.name) + '</span><span class="svc-kind">' + kind + '</span>'
         + '<span class="svc-bar" style="width:' + pct + '%"></span></td>'
         + '<td class="svc-num">' + mem + '</td>'
         + '<td class="svc-num">' + cpu + '</td></tr>';
     }).join('');
   }
 
+  let fetching = false;
   async function tick() {
+    if (fetching) return;
+    fetching = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
     try {
-      const r = await fetch('/api/metrics', { credentials: 'same-origin' });
-      if (!r.ok) return;
+      const r = await fetch('/api/metrics', { credentials: 'same-origin', signal: controller.signal });
+      if (r.status === 401 || r.redirected) {
+        $('stamp').textContent = '会话已失效，请重新登录';
+        return;
+      }
+      if (!r.ok) throw new Error('指标暂不可用');
       const d = await r.json();
 
       $('stamp').textContent = '已运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString() + (d.degraded ? ' · 数据可能延迟' : '');
 
       const hist = Array.isArray(d.history) ? d.history : [];
-      const n = hist.length;
       const clock = ts => {
         const dt = new Date(ts * 1000);
         const hh = String(dt.getHours()).padStart(2, '0');
@@ -172,14 +182,15 @@ $stats_strip
         const h = sec / 3600;
         return (h >= 10 ? Math.round(h) : h.toFixed(1)) + ' 小时';
       };
-      const lastTs = hist.length ? hist[hist.length - 1].ts : null;
-      if (s.cpu.length === 0 && n) {
-        hist.forEach(h => { push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs); });
-      } else if (lastTs !== null && s.ts[s.ts.length - 1] !== lastTs) {
-        // 后端是分钟桶：只有开了新桶才加点，别每个 tick 都塞
-        const h = hist[hist.length - 1];
-        push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs);
-      }
+      // 完整使用后端窗口，当前桶均值、断线补点、模式切换和淘汰都会立即反映。
+      s.ts = hist.map(h => h.ts);
+      s.cpu = hist.map(h => h.cpu);
+      s.mem = hist.map(h => h.mem_pct);
+      s.rx = hist.map(h => h.rx_kbs);
+      s.tx = hist.map(h => h.tx_kbs);
+      $('c-cpu').setAttribute('aria-label', 'CPU 当前使用率 ' + d.cpu + '%');
+      $('c-mem').setAttribute('aria-label', '内存当前使用率 ' + d.mem_pct + '%');
+      $('c-net').setAttribute('aria-label', '下行 ' + d.rx_kbs + ' KiB/s，上行 ' + d.tx_kbs + ' KiB/s');
 
       // 横轴不预留未来：从第一个点画到最后一个点，跨度就是已存到的时间
       const have = s.ts.length;
@@ -200,14 +211,19 @@ $stats_strip
       // 网络纵轴取整到好看的档（10/20/50/100…），避免出现 74 这种怪刻度
       const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
       const peak = Math.max.apply(null, s.rx.concat(s.tx).concat([0]));
-      const netMax = NICE.find(v => v >= peak * 1.15) || NICE[NICE.length - 1];
+      const netMax = NICE.find(v => v >= peak * 1.15) || Math.ceil(peak * 1.15 / 10000) * 10000;
       draw($('c-net'), [
         { data: s.rx, ts: s.ts, max: netMax, color: '#3ecf8e', fill: 'rgba(62,207,142,0.10)' },
         { data: s.tx, ts: s.ts, max: netMax, color: '#e0a35a', fill: 'rgba(224,163,90,0.10)' }
       ], netMax, '', t0, t1);
 
       renderServices(d.services);
-    } catch (e) {}
+    } catch (e) {
+      $('stamp').textContent = '指标更新失败，稍后自动重试';
+    } finally {
+      clearTimeout(timeout);
+      fetching = false;
+    }
   }
   tick(); setInterval(tick, 3000);
   window.addEventListener('resize', tick);

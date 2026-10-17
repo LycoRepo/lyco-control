@@ -22,14 +22,15 @@ import ipaddress
 import json
 import os
 import re
-import socket
+import stat
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from string import Template
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse, unquote
 
 import metrics
 import service_status
@@ -43,12 +44,13 @@ BIND = os.environ.get("PORTAL_BIND", "127.0.0.1")
 COOKIE = "panel_gate"
 COOKIE_DOMAIN = os.environ.get("PORTAL_COOKIE_DOMAIN", "")   # 例如 .example.com
 SECURE_COOKIE = os.environ.get("PORTAL_SECURE", "0") == "1"
-SESSION_HOURS = int(os.environ.get("PORTAL_SESSION_HOURS", "8"))   # 登录有效期（小时）
+SESSION_HOURS = max(1, min(168, int(os.environ.get("PORTAL_SESSION_HOURS", "8"))))
 SESSION_SECONDS = SESSION_HOURS * 3600
 PBKDF2_ITERS = 200_000
 MIN_PASSWORD = 10              # 密码最短长度
 MAX_BODY = 256 * 1024          # 表单就几百字节，给足余量但不让人塞爆内存
-CFG_LOCK = threading.Lock()    # 配置读改写串行化
+CFG_LOCK = threading.Lock()    # 仅保护配置快照发布
+CFG_WRITE_LOCK = threading.Lock()  # 写盘串行化，不阻塞认证读取配置快照
 LOGIN_LOCK = threading.Lock()          # 登录失败计数
 LOGIN_FAILS: dict[str, tuple[int, float]] = {}
 MAX_FAILS = 5                          # 单个 IP 连续失败 5 次开始封
@@ -62,7 +64,8 @@ GLOBAL_FAILS: list[float] = []         # 失败时间戳（滑动窗口）
 GLOBAL_UNTIL = 0.0
 LOGIN_LOG = os.environ.get("PORTAL_LOGIN_LOG", "")   # 审计日志，空则只写 stdout
 LOGIN_SEM = threading.Semaphore(2)
-AUDIT_LOCK = threading.Lock()     # 同时最多处理 2 个登录请求
+AUDIT_LOCK = threading.Lock()     # 审计追加与轮转串行化
+PROBE_SEM = threading.BoundedSemaphore(8)
 TITLE = os.environ.get("PORTAL_TITLE", "服务入口")
 
 DEFAULT_CONFIG = {
@@ -72,7 +75,7 @@ DEFAULT_CONFIG = {
     "setup_token": "",
     "title": TITLE,
     # 资源曲线：窗口长度（小时）与是否用原始 6 分钟模式。UI 里能改，这里只是默认值。
-    "metrics": {"hours": 24, "short": False},
+    "metrics": {"hours": metrics.HISTORY_HOURS, "short": False},
     "services": [
         # 一个卡片 = 一个入口。url 是点进去的地址（可用 https://… 或站内 /detail?id=xxx）。
         # check 是服务端探活的地址（建议指向 127.0.0.1 上的真实端口）。
@@ -93,10 +96,15 @@ DEFAULT_CONFIG = {
 def load_config() -> dict:
     """读配置；缺字段就补齐并落盘。第一次运行也走同一条补齐路径（否则会漏掉 setup_token）。"""
     if os.path.exists(CFG_PATH):
+        if os.path.islink(CFG_PATH):
+            raise ValueError("配置文件不能是符号链接")
+        os.chmod(CFG_PATH, 0o600)
         with io.open(CFG_PATH, encoding="utf-8") as fh:
             cfg = json.load(fh)
     else:
         cfg = {}
+    if not isinstance(cfg, dict):
+        raise ValueError("配置必须是 JSON 对象")
     changed = False
     for key, val in DEFAULT_CONFIG.items():
         if key not in cfg:
@@ -111,20 +119,57 @@ def load_config() -> dict:
     if not cfg.get("password_hash") and not cfg.get("setup_token"):
         cfg["setup_token"] = secrets_token()   # 首启时生成，设完密码即清空
         changed = True
+    validate_config(cfg)
     if changed:
         save_config(cfg)
     return cfg
 
 
+def validate_config(cfg: dict) -> None:
+    """拒绝损坏的配置；认证配置异常时不能自动退回首次设置。"""
+    for key in ("secret", "session_epoch", "password_hash", "setup_token", "title"):
+        if not isinstance(cfg.get(key), str):
+            raise ValueError("配置字段类型无效：" + key)
+    if not isinstance(cfg.get("metrics"), dict):
+        raise ValueError("指标配置必须是对象")
+    hours = cfg["metrics"].get("hours", 24)
+    if type(hours) is not int or not 1 <= hours <= 168 or type(cfg["metrics"].get("short", False)) is not bool:
+        raise ValueError("指标时长必须为 1–168 小时，短期模式必须为布尔值")
+    services = cfg.get("services")
+    if not isinstance(services, list) or len(services) > 128:
+        raise ValueError("卡片数量不能超过 128")
+    ids = set()
+    for svc in services:
+        if not isinstance(svc, dict):
+            raise ValueError("卡片必须是对象")
+        if type(svc.get("enabled", True)) is not bool:
+            raise ValueError("卡片启用状态必须为布尔值")
+        for key in ("id", "name", "desc", "url", "check", "unit", "log", "icon"):
+            if not isinstance(svc.get(key, ""), str):
+                raise ValueError("卡片字段类型无效：" + key)
+        sid = svc.get("id") or slug(svc.get("name", ""))
+        if sid in ids:
+            raise ValueError("卡片标识重复：" + sid)
+        ids.add(sid)
+        target = svc.get("check", "")
+        if target and not service_status.valid_http_url(target):
+            raise ValueError("探活地址必须是有效的 HTTP 或 HTTPS 地址")
+        if svc.get("unit") and not service_status.valid_unit(svc["unit"]):
+            raise ValueError("服务单元名称无效")
+
+
 def save_config(cfg: dict) -> None:
-    tmp = "{}.{}.tmp".format(CFG_PATH, os.getpid())
     # 先用 0600 建文件再写：默认 umask 下临时文件可能是 0644，里面装着会话密钥
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with io.open(fd, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(cfg, fh, ensure_ascii=False, indent=2)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, CFG_PATH)
+    fd, tmp = tempfile.mkstemp(prefix=".portal-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(CFG_PATH)))
+    try:
+        with io.open(fd, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(cfg, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, CFG_PATH)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     try:                                   # 让目录项也落盘，掉电后不会回到旧文件
         dfd = os.open(os.path.dirname(os.path.abspath(CFG_PATH)) or ".", os.O_DIRECTORY)
         try:
@@ -155,7 +200,8 @@ def hash_password(password: str, salt: bytes | None = None) -> str:
 def verify_password(password: str, stored: str) -> bool:
     try:
         scheme, iters, salt_hex, hash_hex = stored.split("$")
-        if scheme != "pbkdf2":
+        if (scheme != "pbkdf2" or not 100_000 <= int(iters) <= 2_000_000
+                or len(salt_hex) != 32 or not re.fullmatch(r"[0-9a-f]{64}", hash_hex)):
             return False
         digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt_hex), int(iters))
         return hmac.compare_digest(digest.hex(), hash_hex)
@@ -175,8 +221,10 @@ def make_session(secret: str, epoch: str) -> str:
 def valid_session(secret: str, epoch: str, token: str) -> bool:
     """会话 = 过期时间 + HMAC(secret, 过期时间.epoch)。改密码时 epoch 轮换，旧 cookie 立刻失效。"""
     try:
+        if not secret or not epoch or len(token) > 100:
+            return False
         exp_s, sig = token.split(".", 1)
-        if int(exp_s) < time.time():
+        if not exp_s.isascii() or not exp_s.isdigit() or int(exp_s) <= time.time():
             return False
         return hmac.compare_digest(sig, _sign(secret, "{}.{}".format(exp_s, epoch)))
     except Exception:
@@ -190,49 +238,71 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None     # 不跟随：探活只看第一次响应，避免被当成盲 SSRF 的跳板
 
 
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
 def probe(target: str, timeout: float = 2.5) -> dict:
     if not target:
         return {"up": None, "ms": None, "detail": "未配置探活地址"}
-    scheme = urlparse(target).scheme.lower()
-    if scheme not in ("http", "https"):
+    if not service_status.valid_http_url(target):
         return {"up": None, "ms": None, "detail": "仅支持 HTTP 或 HTTPS"}
-    started = time.time()
+    started = time.monotonic()
     try:
         req = urllib.request.Request(target, method="GET", headers={"User-Agent": "panel-gate"})
-        with _OPENER.open(req, timeout=timeout) as resp:
-            resp.read(256)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+        with opener.open(req, timeout=timeout) as resp:
             code = resp.getcode()
-        return {"up": code < 500, "ms": int((time.time() - started) * 1000), "detail": "HTTP {}".format(code)}
+        return {"up": code < 500, "ms": int((time.monotonic() - started) * 1000), "detail": "HTTP {}".format(code)}
     except urllib.error.HTTPError as exc:
         ok = exc.code < 500
-        return {"up": ok, "ms": int((time.time() - started) * 1000), "detail": "HTTP {}".format(exc.code)}
+        exc.close()
+        return {"up": ok, "ms": int((time.monotonic() - started) * 1000), "detail": "HTTP {}".format(exc.code)}
     except Exception as exc:  # 连接失败、超时、DNS
-        return {"up": False, "ms": int((time.time() - started) * 1000), "detail": type(exc).__name__}
+        return {"up": False, "ms": int((time.monotonic() - started) * 1000), "detail": type(exc).__name__}
 
 
 def probe_all(services: list[dict]) -> list[dict]:
     results: list[dict | None] = [None] * len(services)
 
-    def run(idx: int, svc: dict) -> None:
+    def check(idx: int, svc: dict) -> None:
         if not svc.get("check") and svc.get("unit"):
             st = service_status.unit_state(svc["unit"])
-            active = st.get("active") == "active"
+            active = None if st.get("active") in (None, "unknown") else st["active"] == "active"
             results[idx] = {"up": active, "ms": None,
                             "detail": "服务单元状态：{}".format(st.get("active") or "未知")}
             return
         results[idx] = probe(svc.get("check", ""))
 
-    threads = [threading.Thread(target=run, args=(i, s), daemon=True) for i, s in enumerate(services)]
+    pending = iter(enumerate(services))
+    pending_lock = threading.Lock()
+    deadline = time.monotonic() + 4
+
+    def run() -> None:
+        try:
+            while time.monotonic() < deadline:
+                with pending_lock:
+                    item = next(pending, None)
+                if item is None:
+                    break
+                idx, svc = item
+                if svc.get("enabled", True):
+                    check(idx, svc)
+        finally:
+            PROBE_SEM.release()
+
+    threads = []
+    for _ in range(min(8, len(services))):
+        if not PROBE_SEM.acquire(blocking=False):
+            break
+        th = threading.Thread(target=run, daemon=True)
+        try:
+            th.start()
+        except RuntimeError:
+            PROBE_SEM.release()
+            continue
+        threads.append(th)
     for th in threads:
-        th.start()
-    for th in threads:
-        th.join(timeout=4)
+        th.join(timeout=max(0, deadline - time.monotonic()))
     out = []
     for i, svc in enumerate(services):
-        r = results[i] or {"up": None, "ms": None, "detail": "探活超时"}
+        r = results[i] or {"up": None, "ms": None, "detail": "探活繁忙或超时"}
         out.append({**svc, **r})
     return out
 
@@ -242,16 +312,18 @@ def safe_url(u: str) -> str:
     u = (u or "").strip()
     if not u:
         return ""
-    if u.startswith("/") and not u.startswith("//"):
+    if any(ord(c) < 32 or ord(c) == 127 for c in u) or "\\" in u:
+        return ""
+    if safe_next(u):
         return u
-    return u if urlparse(u).scheme.lower() in ("http", "https") else ""
+    return u if service_status.valid_http_url(u) else ""
 
 
 def safe_next(target: str) -> bool:
     """只接受站内绝对路径：排除 //host、/\\host、以及带协议的跳转，防开放重定向。"""
     if not target or not target.startswith("/"):
         return False
-    if target.startswith("//") or target.startswith("/\\"):
+    if target.startswith("//") or "\\" in target or any(ord(c) < 32 or ord(c) == 127 for c in target):
         return False
     return "://" not in target and "\r" not in target and "\n" not in target
 
@@ -288,7 +360,7 @@ def slug(name: str) -> str:
 
 
 def card_msg(text: str, cls: str) -> str:
-    return '<p class="msg {}">{}</p>'.format(cls, text) if text else ""
+    return '<p class="msg {}" role="status">{}</p>'.format(cls, html_mod.escape(text)) if text else ""
 
 
 # ---------- 渲染 ----------
@@ -334,7 +406,7 @@ def metrics_block_html(cfg: dict) -> str:
         headline = "已记录 {} 分钟".format(round(sec / 60))
     else:
         headline = "已记录 {:.1f} 小时".format(sec / 3600)
-    note = "{}。共 {} 个点，每 {} 秒采样。重启后清空。".format(
+    note = "{}。共 {} 个点，每 {} 秒聚合。服务重启可恢复，机器重启清空。".format(
         headline, st["points"], st["bucket"])
     return (
         '<form method="post" action="/admin/metrics" class="settings">'
@@ -384,14 +456,14 @@ def admin_rows(services: list[dict]) -> str:
         rows.append(
             '<tr>'
             '<td><input type="hidden" name="id_{i}" value="{sid}">'
-            '<input name="icon_{i}" value="{icon}" class="w-icon"></td>'
-            '<td><input name="name_{i}" value="{name}" class="w-name"></td>'
-            '<td><input name="desc_{i}" value="{desc}" class="w-desc"></td>'
-            '<td><input name="url_{i}" value="{url}" class="w-url"></td>'
-            '<td><input name="check_{i}" value="{check}" class="w-check"></td>'
-            '<td><input name="unit_{i}" value="{unit}" class="w-unit" placeholder="服务单元名称"></td>'
-            '<td><input name="log_{i}" value="{log}" class="w-log" placeholder="日志文件路径"></td>'
-            '<td class="center"><input type="checkbox" name="enabled_{i}" {checked}></td>'
+            '<input aria-label="卡片 {i}：图标" name="icon_{i}" value="{icon}" class="w-icon"></td>'
+            '<td><input aria-label="卡片 {i}：名称" name="name_{i}" value="{name}" class="w-name"></td>'
+            '<td><input aria-label="卡片 {i}：说明" name="desc_{i}" value="{desc}" class="w-desc"></td>'
+            '<td><input aria-label="卡片 {i}：链接" name="url_{i}" value="{url}" class="w-url"></td>'
+            '<td><input aria-label="卡片 {i}：探活地址" name="check_{i}" value="{check}" class="w-check"></td>'
+            '<td><input aria-label="卡片 {i}：服务单元" name="unit_{i}" value="{unit}" class="w-unit" placeholder="服务单元名称"></td>'
+            '<td><input aria-label="卡片 {i}：日志文件" name="log_{i}" value="{log}" class="w-log" placeholder="日志文件路径"></td>'
+            '<td class="center"><input type="checkbox" aria-label="卡片 {i}：启用" name="enabled_{i}" {checked}></td>'
             '</tr>'.format(i=i, sid=html_mod.escape(str(svc.get("id") or slug(svc.get("name", "")))),
                            icon=html_mod.escape(str(svc.get("icon", ""))),
                            name=html_mod.escape(str(svc.get("name", ""))),
@@ -412,6 +484,16 @@ class Handler(BaseHTTPRequestHandler):
     timeout = 15                    # 慢连接最多占一个线程 15 秒
     cfg = DEFAULT_CONFIG  # 由 main() 覆盖
 
+    def handle_one_request(self):
+        # 每次请求固定一份不可变配置；keep-alive 的下一次请求重新取快照。
+        with CFG_LOCK:
+            self.cfg = type(self).cfg
+        self._csp_nonce = secrets_token()
+        try:
+            super().handle_one_request()
+        except (ConnectionError, TimeoutError):
+            self.close_connection = True
+
     # --- 工具 ---
     def _cookies(self) -> dict:
         raw = self.headers.get("Cookie", "")
@@ -423,7 +505,8 @@ class Handler(BaseHTTPRequestHandler):
         return out
 
     def _logged_in(self) -> bool:
-        return valid_session(self.cfg.get("secret", ""), self.cfg.get("session_epoch", ""),
+        cfg = type(self).cfg
+        return bool(cfg.get("password_hash")) and valid_session(cfg.get("secret", ""), cfg.get("session_epoch", ""),
                              self._cookies().get(COOKIE, ""))
 
     def _cookie_header(self, value: str, max_age: int) -> str:
@@ -441,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         if SECURE_COOKIE:
             return "https"
-        proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+        proto = (self.headers.get("X-Forwarded-Proto") or "").strip().lower() if self._trusted_proxy() else ""
         return proto if proto in ("http", "https") else None
 
     def _is_https(self) -> bool:
@@ -451,6 +534,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
         for h in extra or []:
             self.send_header(*h.split(": ", 1))
         self.end_headers()
@@ -462,12 +546,24 @@ class Handler(BaseHTTPRequestHandler):
         # 头必须是 ASCII：中文路径也要能跳
         self.send_header("Location", quote(location, safe=":/?#[]@!&'()*+,;=%"))
         self.send_header("Content-Length", "0")
+        self._security_headers()
         for h in extra or []:
             self.send_header(*h.split(": ", 1))
         self.end_headers()
 
+    def _security_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'nonce-{}'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".format(self._csp_nonce))
+
     def _body(self) -> dict:
         self._too_large = False
+        lengths = self.headers.get_all("Content-Length", [])
+        if self.headers.get("Transfer-Encoding") or len(lengths) != 1 or not re.fullmatch(r"[0-9]+", lengths[0]):
+            self._too_large = True
+            return {}
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -475,8 +571,16 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0 or length > MAX_BODY:
             self._too_large = True      # 负数会让 read() 一直读到 EOF，必须挡掉
             return {}
-        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
-        return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+        raw = self.rfile.read(length) if length else b""
+        if len(raw) != length:
+            self._too_large = True
+            return {}
+        try:
+            return {k: v[0] for k, v in parse_qs(raw.decode("utf-8"), keep_blank_values=True,
+                                               max_num_fields=2048).items()}
+        except (ValueError, UnicodeError):
+            self._too_large = True
+            return {}
 
     # --- 路由 ---
     def do_HEAD(self):
@@ -521,7 +625,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._redirect("/")      # 资源已经并在首页，旧书签回到首页
         if path == "/api/metrics":
             metrics.ensure_sampler()
-            payload = metrics.last()
+            try:
+                payload = metrics.last()
+            except RuntimeError:
+                return self._send(b'{"error":"metrics_unavailable"}', 503, "application/json")
             payload["services"] = metrics.last_services()
             return self._send(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                               200, "application/json; charset=utf-8",
@@ -540,13 +647,13 @@ class Handler(BaseHTTPRequestHandler):
                 name=html_mod.escape(svc.get("name", "")),
                 desc=html_mod.escape(svc.get("desc", "")),
                 unit=html_mod.escape(svc.get("unit", "") or "未配置服务单元"),
-                active=st["active"] or "—",
-                enabled=st["enabled"] or "—",
+                active=html_mod.escape(st["active"] or "—"),
+                enabled=html_mod.escape(st["enabled"] or "—"),
                 rss=st["rss"] if st["rss"] is not None else "—",
                 active_cls="ok" if st["active"] == "active" else "down",
                 enabled_cls="ok" if st["enabled"] == "enabled" else "unknown",
-                health_cls="ok" if snap["health"]["ok"] else "down",
-                health_text="正常" if snap["health"]["ok"] else "失败",
+                health_cls=status_class(snap["health"]["ok"]),
+                health_text="未配置" if snap["health"]["ok"] is None else ("正常" if snap["health"]["ok"] else "失败"),
                 health_ok=snap["health"]["ok"],
                 health_detail=html_mod.escape(snap["health"]["detail"]),
                 log=html_mod.escape("\n".join(snap["log"]) or "未配置日志文件"),
@@ -577,8 +684,11 @@ class Handler(BaseHTTPRequestHandler):
             if pw != form.get("confirm", ""):
                 return self._send(self.render("setup.html", error_block=card_msg("两次输入的密码不一致", "err"),
                                          setup_token=self.cfg.get("setup_token", "")), 400)
+            new_hash = hash_password(pw)
             def _apply(cfg):
-                cfg["password_hash"] = hash_password(pw)
+                if cfg.get("password_hash") or cfg.get("setup_token") != form.get("t", ""):
+                    raise ValueError("首次设置链接已失效")
+                cfg["password_hash"] = new_hash
                 cfg["setup_token"] = ""
                 cfg["session_epoch"] = secrets_token()
             err = self._commit(_apply)
@@ -599,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(2)      # 全局降速：只让人变慢，绝不把所有人挡在门外
             pw = form.get("password", "")
             # 排队也要有上限：否则大量并发请求会堆在这里等着算哈希
-            if not LOGIN_SEM.acquire(timeout=5):
+            if not LOGIN_SEM.acquire(blocking=False):
                 return self._send(self.render("login.html",
                                          error_block=card_msg("请求频繁，请稍后重试", "err"),
                                          next=quote(form.get("next", "/"))), 503,
@@ -613,14 +723,15 @@ class Handler(BaseHTTPRequestHandler):
                                       extra=["Retry-After: {}".format(max(wait, 1))])
                 # 三个值在同一把锁里取，避免「旧哈希 + 新 epoch」这种半新半旧的快照
                 with CFG_LOCK:
-                    snap_hash = self.cfg.get("password_hash", "")
-                    snap_epoch = self.cfg.get("session_epoch", "")
-                    snap_secret = self.cfg.get("secret", "")
+                    current = type(self).cfg
+                    snap_hash = current.get("password_hash", "")
+                    snap_epoch = current.get("session_epoch", "")
+                    snap_secret = current.get("secret", "")
                 ok = verify_password(pw, snap_hash)
                 if ok:
                     # 复核：验证期间改过密码就作废这次通过
                     with CFG_LOCK:
-                        ok = self.cfg.get("session_epoch", "") == snap_epoch
+                        ok = type(self).cfg.get("session_epoch", "") == snap_epoch
             finally:
                 LOGIN_SEM.release()
             self._note_login(ok)      # 只记最终结果：被作废的通过不能记成 OK
@@ -663,7 +774,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                          msg_block=card_msg(err, "err"), path=CFG_PATH,
                                          metrics_block=metrics_block_html(self.cfg)), 500)
-            metrics.configure(hours=hours, short=short)
             return self._redirect("/admin")
         if path == "/admin/password":
             return self._save_password(form)
@@ -678,11 +788,10 @@ class Handler(BaseHTTPRequestHandler):
     def _client_ip(self) -> str:
         """反代后面取真实客户端 IP。
 
-        只信 nginx 用 $remote_addr 覆盖写的 X-Client-IP（客户端改不了）。
-        退而求其次取 X-Forwarded-For 的**最后**一段（那是自己这台反代追加的）；
-        取第一段等于让攻击者自己填一个"新 IP"来绕过限速。
+        仅信任本机反代用 $remote_addr 覆盖写的 X-Client-IP；其他连接用对端地址。
+        不读取 X-Forwarded-For，避免客户端伪造身份绕过限流。
         """
-        raw = (self.headers.get("X-Client-IP") or "").strip() or self.client_address[0]
+        raw = ((self.headers.get("X-Client-IP") or "").strip() if self._trusted_proxy() else "") or self.client_address[0]
         try:
             ip = ipaddress.ip_address(raw)
         except ValueError:
@@ -694,7 +803,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _login_blocked(self) -> tuple[bool, int]:
         """返回 (是否封禁, 还要等几秒)。只按 IP 硬拦；全局只做降速，不把站长一起关在门外。"""
-        now = time.time()
+        now = time.monotonic()
         with LOGIN_LOCK:
             fails, until = LOGIN_FAILS.get(self._client_ip(), (0, 0.0))
             if fails >= MAX_FAILS and now < until:
@@ -703,22 +812,25 @@ class Handler(BaseHTTPRequestHandler):
 
     def _global_slow(self) -> bool:
         with LOGIN_LOCK:
-            return time.time() < GLOBAL_SLOW_UNTIL
+            return time.monotonic() < GLOBAL_SLOW_UNTIL
 
     def _note_login(self, ok: bool) -> None:
         """记一次登录结果。锁里只动内存计数；审计写盘在锁外。"""
         global GLOBAL_SLOW_UNTIL
         ip = self._client_ip()
-        now = time.time()
+        now = time.monotonic()
         with LOGIN_LOCK:
             if ok:
                 LOGIN_FAILS.pop(ip, None)
                 GLOBAL_FAILS.clear()
                 GLOBAL_SLOW_UNTIL = 0.0
             else:
-                fails, _ = LOGIN_FAILS.get(ip, (0, 0.0))
+                fails, until = LOGIN_FAILS.get(ip, (0, 0.0))
+                if fails < MAX_FAILS and until <= now:
+                    fails = 0
                 fails += 1
                 if fails >= MAX_FAILS:
+                    fails = min(fails, MAX_FAILS + 6)
                     wait = min(BASE_BLOCK * (2 ** (fails - MAX_FAILS)), MAX_BLOCK)
                     LOGIN_FAILS[ip] = (fails, now + wait)
                 else:
@@ -748,7 +860,12 @@ class Handler(BaseHTTPRequestHandler):
                 with AUDIT_LOCK:      # 并发登录撞上轮转会把刚保留的 .1 覆盖掉
                     if os.path.exists(LOGIN_LOG) and os.path.getsize(LOGIN_LOG) > 1024 * 1024:
                         os.replace(LOGIN_LOG, LOGIN_LOG + ".1")
-                    with io.open(LOGIN_LOG, "a", encoding="utf-8") as fh:
+                    fd = os.open(LOGIN_LOG, os.O_APPEND | os.O_WRONLY | os.O_CREAT
+                                 | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+                    with io.open(fd, "a", encoding="utf-8") as fh:
+                        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                            raise OSError("审计日志不是普通文件")
+                        os.chmod(LOGIN_LOG, 0o600)
                         fh.write(line)
                 return
             except Exception as exc:
@@ -760,21 +877,25 @@ class Handler(BaseHTTPRequestHandler):
         """浏览器发起的跨站 POST 要挡掉：Origin（其次 Referer）的主机必须与 Host 一致。
 
         SameSite=Lax 只挡跨站，同父域下的兄弟子域仍算 same-site，所以这里再核一次主机。
-        没有 Origin/Referer 的请求（curl、脚本）放行——它们本来就能直接调接口。
+        缺少来源头时拒绝；脚本调用也须显式提供本入口的 Origin。
         """
         ref = self.headers.get("Origin") or self.headers.get("Referer") or ""
         if not ref:
-            return True            # curl/脚本没有这个头；浏览器一定会带
+            return False
         try:
             origin = urlparse(ref)
             host = (self.headers.get("Host", "") or "").lower()
-            if origin.netloc.lower() != host:
+            if origin.scheme not in ("http", "https") or origin.username is not None or origin.netloc.lower() != host:
                 return False
             # 协议不同也算跨源（防止 https 页面被 http 提交）；判不出来就只比主机
             want = self._want_scheme()
             return True if want is None else (origin.scheme or want).lower() == want
         except Exception:
             return False
+
+    def _trusted_proxy(self) -> bool:
+        # 默认仅信任本机反代；远程反代需通过网络隔离或本机转发接入。
+        return ipaddress.ip_address(self.client_address[0]).is_loopback
 
     def render(self, template: str, **ctx) -> bytes:
         """模板渲染：标题优先用配置里改过的名字，没改过才用环境变量。"""
@@ -783,7 +904,12 @@ class Handler(BaseHTTPRequestHandler):
         ctx.setdefault("title", title)
         ctx.setdefault("title_attr", title)
         ctx.setdefault("brand_mark", html_mod.escape(brand_mark(title)))
-        return render(template, **ctx)
+        if "path" in ctx:
+            ctx["path"] = html_mod.escape(str(ctx["path"]))
+        if "next" in ctx:
+            # 隐藏字段保存实际目标；URL 编码只用于 Location 查询串。
+            ctx["next"] = html_mod.escape(unquote(ctx["next"]))
+        return render(template, **ctx).replace(b"<script>", ('<script nonce="' + self._csp_nonce + '">').encode("ascii"))
 
     def _setup_allowed(self, given: str | None = None) -> bool:
         """首次设密码必须有 setup_token。
@@ -830,17 +956,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(json.dumps(data, ensure_ascii=False).encode(), 200, "application/json")
 
     def _static(self, path: str):
-        rel = path[len("/static/"):]
-        if ".." in rel or rel.startswith("/"):
+        rel = unquote(path[len("/static/"):])
+        if "\\" in rel or "\x00" in rel:
+            return self._send(b"400", 400, "text/plain")
+        root = os.path.realpath(STATIC_DIR)
+        full = os.path.realpath(os.path.join(root, rel))
+        try:
+            inside = os.path.commonpath([root, full]) == root
+        except ValueError:
+            inside = False
+        if "\\" in rel or "\x00" in rel or not inside:
             return self._send(b"\xe8\xaf\xb7\xe6\xb1\x82\xe6\x97\xa0\xe6\x95\x88", 400, "text/plain")
-        full = os.path.join(STATIC_DIR, rel)
         if not os.path.isfile(full):
             return self._send(b"\xe6\x96\x87\xe4\xbb\xb6\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8", 404, "text/plain")
         ext = os.path.splitext(full)[1].lower()
         ctype = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml",
                  ".png": "image/png", ".ico": "image/x-icon"}.get(ext, "application/octet-stream")
-        with open(full, "rb") as fh:
-            return self._send(fh.read(), 200, ctype)
+        try:
+            with open(full, "rb") as fh:
+                body = fh.read()
+        except OSError:
+            return self._send(b"404", 404, "text/plain")
+        return self._send(body, 200, ctype)
 
     def _save_services(self, form: dict):
         idxs = sorted({int(k.split("_")[1]) for k in form if k.startswith("name_") and k.split("_")[1].isdigit()})
@@ -875,15 +1012,26 @@ class Handler(BaseHTTPRequestHandler):
         之前是「先改内存再写盘」，写盘失败时运行中的密码/配置已经变了，重启又退回旧值，
         旧密码会在重启后重新可用。
         """
-        with CFG_LOCK:
-            new_cfg = copy.deepcopy(self.cfg)
-            mutate(new_cfg)
+        with CFG_WRITE_LOCK:
+            with CFG_LOCK:
+                current = type(self).cfg
+            if self.cfg.get("session_epoch") != current.get("session_epoch"):
+                return "认证配置已更新，请重新登录"
+            new_cfg = copy.deepcopy(current)
             try:
+                mutate(new_cfg)
+                validate_config(new_cfg)
                 save_config(new_cfg)
+            except ValueError as exc:
+                return str(exc)
             except Exception as exc:
                 return "保存配置失败：{}".format(type(exc).__name__)
-            # 只做 update，不 clear：clear+update 之间读线程会看到空配置，直接 KeyError
-            self.cfg.update(new_cfg)
+            # 不修改已发布的字典，避免读线程混用不同版本的密钥与配置。
+            mx = new_cfg["metrics"]
+            metrics.configure(hours=mx.get("hours", 24), short=bool(mx.get("short")))
+            with CFG_LOCK:
+                type(self).cfg = new_cfg
+                self.cfg = new_cfg
         return None
 
     def _save_password(self, form: dict):
@@ -899,8 +1047,11 @@ class Handler(BaseHTTPRequestHandler):
         if new != form.get("confirm", ""):
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                      msg_block=card_msg("两次输入的密码不一致", "err"), path=CFG_PATH, metrics_block=metrics_block_html(self.cfg)), 400)
+        new_hash = hash_password(new)
         def _apply(cfg):
-            cfg["password_hash"] = hash_password(new)
+            if cfg["password_hash"] != self.cfg["password_hash"]:
+                raise ValueError("密码已更新，请重新登录")
+            cfg["password_hash"] = new_hash
             cfg["session_epoch"] = secrets_token()        # 其它设备上的旧 cookie 立即失效
         err = self._commit(_apply)
         if err:
@@ -917,6 +1068,30 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class PortalServer(ThreadingHTTPServer):
+    """限制活动连接数；慢连接和登录排队不能无限创建线程。"""
+
+    def __init__(self, *args, **kwargs):
+        self._slots = threading.BoundedSemaphore(32)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
 def main() -> None:
     cfg = load_config()
     Handler.cfg = cfg
@@ -927,7 +1102,7 @@ def main() -> None:
     metrics.configure(hours=int(mx.get("hours") or 24), short=bool(mx.get("short")))
     metrics.ensure_sampler()
 
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    srv = PortalServer((BIND, PORT), Handler)
     print("lyco-control on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
     if COOKIE_DOMAIN and not SECURE_COOKIE:
         print("警告：PORTAL_COOKIE_DOMAIN={} 但 PORTAL_SECURE=0 —— 上 HTTPS 后务必改成 1"
@@ -935,7 +1110,12 @@ def main() -> None:
     if not cfg.get("password_hash") and cfg.get("setup_token"):
         print("首次使用：打开 /setup?t={} 设置密码（设完这条链接即失效）".format(cfg["setup_token"]),
               flush=True)
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

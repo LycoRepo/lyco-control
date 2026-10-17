@@ -302,3 +302,24 @@ input:-webkit-autofill{-webkit-text-fill-color:var(--text);box-shadow:0 0 0 1000
 /* 退出登录做成 POST 表单，外观仍像导航链接 */
 .navform{display:inline;margin:0}
 button.navlink{border:0;background:transparent;font:inherit;color:inherit;cursor:pointer}
+
+/* 长标题和窄屏保持在容器内；详情表无需沿用卡片编辑表的最小宽度。 */
+.bar-inner{flex-wrap:wrap}
+.brand-name{white-space:normal;overflow-wrap:anywhere}
+.brand-img{flex-shrink:0}
+.hero-title,.hero-sub,.auth-title,.svc-name{overflow-wrap:anywhere}
+.topnav{flex-wrap:wrap}
+.detail-table{min-width:0;table-layout:auto}
+.detail-table th:first-child{width:9em;text-align:left}
+.detail-table td{overflow-wrap:anywhere}
+.detail-table th:last-child{width:auto;text-align:left}
+.card .pill{white-space:normal;overflow-wrap:anywhere;max-width:45%}
+.chart-box{min-width:0}
+.chart-plot canvas{width:0}
+.svc-table th:first-child{text-align:left}
+@media (max-width:680px){
+  .svc-table th:nth-child(2),.svc-table td:nth-child(2){width:140px}
+  .svc-table th:nth-child(3),.svc-table td:nth-child(3){width:64px}
+  .svc-kind{display:block;width:fit-content;margin:4px 0 0}
+  .svc-num{white-space:normal;overflow-wrap:anywhere}
+}

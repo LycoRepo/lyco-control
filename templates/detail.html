@@ -31,14 +31,14 @@
 
   <section class="panel">
     <h2 class="panel-title">运行状态</h2>
-    <div class="table-scroll">
-      <table class="table">
+    <div class="table-scroll" tabindex="0" role="region" aria-label="服务运行状态">
+      <table class="table detail-table">
         <tbody>
-          <tr><th>服务单元</th><td>$unit</td></tr>
-          <tr><th>运行状态</th><td><span class="pill $active_cls">$active</span></td></tr>
-          <tr><th>开机启动状态</th><td><span class="pill $enabled_cls">$enabled</span></td></tr>
-          <tr><th>内存占用</th><td>$rss MB</td></tr>
-          <tr><th>探活结果</th><td><span class="pill $health_cls">$health_text</span></td></tr>
+          <tr><th scope="row">服务单元</th><td>$unit</td></tr>
+          <tr><th scope="row">运行状态</th><td><span class="pill $active_cls">$active</span></td></tr>
+          <tr><th scope="row">开机启动状态</th><td><span class="pill $enabled_cls">$enabled</span></td></tr>
+          <tr><th scope="row">内存占用</th><td>$rss MB</td></tr>
+          <tr><th scope="row">探活结果</th><td><span class="pill $health_cls">$health_text</span></td></tr>
         </tbody>
       </table>
     </div>

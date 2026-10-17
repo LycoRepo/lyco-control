@@ -55,7 +55,7 @@ $rows
       </div>
       <p class="table-help">可左右滚动查看全部字段。</p>
       <div class="row-actions">
-        <button type="button" class="btn ghost" onclick="addRow()">添加卡片</button>
+        <button type="button" class="btn ghost" id="add-card">添加卡片</button>
         <button type="submit" class="btn primary">保存卡片设置</button>
       </div>
     </form>
@@ -94,17 +94,19 @@ function addRow() {
   const i = tb.querySelectorAll('tr').length;
   const tr = document.createElement('tr');
   tr.innerHTML = [
-    '<td><input name="icon_' + i + '" value="•" class="w-icon"></td>',
-    '<td><input name="name_' + i + '" value="" class="w-name" placeholder="卡片名称"></td>',
-    '<td><input name="desc_' + i + '" value="" class="w-desc"></td>',
-    '<td><input name="url_' + i + '" value="https://" class="w-url"></td>',
-    '<td><input name="check_' + i + '" value="http://127.0.0.1:" class="w-check"></td>',
-    '<td><input name="unit_' + i + '" value="" class="w-unit" placeholder="服务单元名称"></td>',
-    '<td><input name="log_' + i + '" value="" class="w-log" placeholder="日志文件路径"></td>',
-    '<td class="center"><input type="checkbox" name="enabled_' + i + '" checked></td>'
+    '<td><input aria-label="图标" name="icon_' + i + '" value="•" class="w-icon"></td>',
+    '<td><input aria-label="名称" name="name_' + i + '" value="" class="w-name" placeholder="卡片名称"></td>',
+    '<td><input aria-label="说明" name="desc_' + i + '" value="" class="w-desc"></td>',
+    '<td><input aria-label="链接" name="url_' + i + '" value="https://" class="w-url"></td>',
+    '<td><input aria-label="探活地址" name="check_' + i + '" value="http://127.0.0.1:" class="w-check"></td>',
+    '<td><input aria-label="服务单元" name="unit_' + i + '" value="" class="w-unit" placeholder="服务单元名称"></td>',
+    '<td><input aria-label="日志文件" name="log_' + i + '" value="" class="w-log" placeholder="日志文件路径"></td>',
+    '<td class="center"><input type="checkbox" aria-label="启用" name="enabled_' + i + '" checked></td>'
   ].join('');
   tb.appendChild(tr);
+  tr.querySelector('input[name^="name_"]').focus();
 }
+document.getElementById('add-card').addEventListener('click', addRow);
 </script>
 </body>
 </html>

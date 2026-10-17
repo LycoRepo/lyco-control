@@ -1,6 +1,8 @@
 # 运行时生成的配置（含密码哈希与会话密钥，绝不入库）
 portal.json
 portal.json.tmp
+.portal-*.tmp
+.metrics-*.tmp
 
 # Python
 __pycache__/

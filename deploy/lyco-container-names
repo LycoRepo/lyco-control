@@ -1,19 +1,31 @@
-#!/bin/sh
+#!/usr/bin/env python3
 # 把「容器 ID → 名字」写成一个门户可读的文件。
 # 这样门户要显示 astrbot 这种名字，却不需要 docker 权限。
-set -e
-out=/var/lib/lyco-portal-ceil
-mkdir -p "$out"
-tmp="$out/containers.json.tmp"
-{
-  printf '{'
-  first=1
-  docker ps --no-trunc --format '{{.ID}} {{.Names}}' 2>/dev/null | while read -r id name; do
-    [ "$first" = 1 ] || printf ','
-    first=0
-    printf '"%s":"%s"' "$id" "$name"
-  done
-  printf '}'
-} > "$tmp"
-chmod 644 "$tmp"
-mv "$tmp" "$out/containers.json"
+import json
+import os
+import subprocess
+import tempfile
+
+
+def main():
+    out = "/var/lib/lyco-portal-ceil"
+    # 命令失败时保留上一份映射，不能把错误吞成空对象。
+    result = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.Names}}"],
+                            check=True, capture_output=True, timeout=10, text=True)
+    names = dict(line.split(maxsplit=1) for line in result.stdout.splitlines() if line.strip())
+    os.makedirs(out, mode=0o755, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".containers-", dir=out)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(names, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+            os.fchmod(fh.fileno(), 0o644)
+        os.replace(tmp, os.path.join(out, "containers.json"))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+if __name__ == "__main__":
+    main()

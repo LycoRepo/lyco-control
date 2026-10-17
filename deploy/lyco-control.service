@@ -21,6 +21,12 @@ Environment=PORTAL_SESSION_HOURS=8
 ExecStart=/usr/bin/python3 /srv/lyco-control/app.py
 Restart=always
 RestartSec=3
+UMask=0077
+RuntimeDirectory=lyco-portal
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=restart
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
