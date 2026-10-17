@@ -27,13 +27,179 @@
     <h1 class="hero-title" id="page-title">服务器入口</h1>
   </section>
 
-  $stats_strip
-
   <section class="grid" aria-label="服务入口">
 $cards
   </section>
 
+$stats_strip
+
+
+  <section class="panel" aria-labelledby="chart-title">
+    <div class="panel-heading">
+      <h2 class="panel-title" id="chart-title">资源趋势</h2>
+      <p class="panel-hint"><span id="span">最近 6 分钟</span> · <span id="stamp">—</span></p>
+    </div>
+    <div class="chart-row three">
+      <div class="chart-box">
+        <p class="chart-title">CPU（%）</p>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-1">—</span><span id="y-mid-1">—</span><span id="y-bot-1">0</span></div><canvas id="c-cpu" height="120"></canvas></div>
+        <p class="chart-axis"><span id="ax-left-1">—</span><span id="ax-mid-1">—</span><span id="ax-right-1">现在</span></p>
+      </div>
+      <div class="chart-box">
+        <p class="chart-title">内存（%）</p>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-2">—</span><span id="y-mid-2">—</span><span id="y-bot-2">0</span></div><canvas id="c-mem" height="120"></canvas></div>
+        <p class="chart-axis"><span id="ax-left-2">—</span><span id="ax-mid-2">—</span><span id="ax-right-2">现在</span></p>
+      </div>
+      <div class="chart-box">
+        <p class="chart-title">网络（KB/s）</p>
+        <div class="chart-plot"><div class="chart-y" aria-hidden="true"><span id="y-top-3">—</span><span id="y-mid-3">—</span><span id="y-bot-3">0</span></div><canvas id="c-net" height="120"></canvas></div>
+        <p class="chart-axis"><span id="ax-left-3">—</span><span id="ax-mid-3">—</span><span id="ax-right-3">现在</span></p>
+        <p class="chart-legend"><span class="lg lg-rx"></span>下行 <span class="lg lg-tx"></span>上行</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="svc-title">
+    <div class="panel-heading">
+      <h2 class="panel-title" id="svc-title">服务占用</h2>
+      <p class="panel-hint">按内存排序 · 容器与服务都在内</p>
+    </div>
+    <div class="table-scroll" tabindex="0" role="region" aria-label="服务占用表格">
+      <table class="table svc-table">
+        <caption class="sr-only">各服务与容器的内存和 CPU 占用</caption>
+        <thead><tr><th scope="col">名称</th><th scope="col">内存</th><th scope="col">CPU</th></tr></thead>
+        <tbody id="svc-rows"><tr><td colspan="3" class="panel-hint">读取中…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
   <footer class="foot">状态于 <time>$when</time> 检查 · 数据来自服务端探活</footer>
 </main>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const s = { cpu: [], mem: [], rx: [], tx: [] };
+  if (!$('c-cpu')) return;
+
+  const H = 120;   // 逻辑高度固定：绝不能再从 canvas 属性里读（那会被自己越写越大）
+
+  function fit(c) {
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth || 260;
+    c.style.height = H + 'px';          // CSS 高度钉死
+    c.width = Math.round(w * dpr);      // 仅后备缓冲按 DPR 放大
+    c.height = Math.round(H * dpr);
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, w, h: H };
+  }
+  function draw(c, series, axisMax, unit) {
+    const { ctx, w, h } = fit(c);
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= 3; i++) {
+      const y = Math.round(h * i / 3) + .5;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+    }
+    // 纵轴刻度用左侧的 HTML 文字显示（canvas 里的小字太糊）
+    const fmt = v => (v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + 'k' : String(Math.round(v)));
+    if (c.dataset.axis !== String(axisMax) + (unit || '')) {
+      const n = c.id.replace('c-', '');
+      const idx = { cpu: 1, mem: 2, net: 3 }[n];
+      const put = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = fmt(v) + (unit || ''); };
+      put('y-top-' + idx, axisMax); put('y-mid-' + idx, axisMax / 2); put('y-bot-' + idx, 0);
+      c.dataset.axis = String(axisMax) + (unit || '');
+    }
+    const pad = 2;
+    series.forEach(x => {
+      const pts = x.data;
+      if (pts.length < 2) return;
+      ctx.beginPath();
+      pts.forEach((v, i) => {
+        const px = pad + (w - pad * 2) * (i / (pts.length - 1));
+        const py = h - pad - (h - pad * 2) * Math.min(1, v / x.max);
+        i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      });
+      ctx.strokeStyle = x.color; ctx.lineWidth = 1.6; ctx.stroke();
+      ctx.lineTo(w - pad, h - pad); ctx.lineTo(pad, h - pad); ctx.closePath();
+      ctx.fillStyle = x.fill; ctx.fill();
+    });
+  }
+  function push(a, v) { a.push(v); if (a.length > 120) a.shift(); }
+
+  function renderServices(list) {
+    const tb = $('svc-rows');
+    if (!Array.isArray(list) || !list.length) return;
+    const maxMem = Math.max.apply(null, list.map(x => x.mem_mb).concat([1]));
+    tb.innerHTML = list.map(x => {
+      const pct = Math.max(2, Math.round(100 * x.mem_mb / maxMem));
+      const cpu = x.cpu > 0 ? x.cpu.toFixed(1) + '%' : '—';
+      const mem = x.mem_mb.toFixed(1) + ' MB · ' + (x.mem_pct ?? 0).toFixed(1) + '%';
+      const kind = x.kind === 'container' ? '容器' : '服务';
+      return '<tr><td><span class="svc-name">' + x.name + '</span><span class="svc-kind">' + kind + '</span>'
+        + '<span class="svc-bar" style="width:' + pct + '%"></span></td>'
+        + '<td class="svc-num">' + mem + '</td>'
+        + '<td class="svc-num">' + cpu + '</td></tr>';
+    }).join('');
+  }
+
+  async function tick() {
+    try {
+      const r = await fetch('/api/metrics', { credentials: 'same-origin' });
+      if (!r.ok) return;
+      const d = await r.json();
+
+      $('stamp').textContent = '运行 ' + d.uptime_h + ' 小时 · 更新于 ' + new Date(d.ts * 1000).toLocaleTimeString();
+
+      const hist = Array.isArray(d.history) ? d.history : [];
+      const n = hist.length;
+      const spanSec = Math.max(0, d.ts - (hist[0] ? hist[0].ts : d.ts));
+      const clock = ts => {
+        const dt = new Date(ts * 1000);
+        const hh = String(dt.getHours()).padStart(2, '0');
+        const mm = String(dt.getMinutes()).padStart(2, '0');
+        if (spanSec < 120) return hh + ':' + mm + ':' + String(dt.getSeconds()).padStart(2, '0');
+        return hh + ':' + mm;
+      };
+      const human = sec => {
+        if (sec < 90) return Math.round(sec) + ' 秒';
+        if (sec < 3600) return Math.round(sec / 60) + ' 分钟';
+        return (sec / 3600).toFixed(1) + ' 小时';
+      };
+      $('span').textContent = n < 2 ? '刚启动，正在积累' : '最近 ' + human(spanSec);
+
+      const labels = n < 2 ? ['—', '—', '现在']
+        : [clock(hist[0].ts), clock(Math.round((hist[0].ts + d.ts) / 2)), clock(d.ts)];
+      ['1', '2', '3'].forEach(k => {
+        $('ax-left-' + k).textContent = labels[0];
+        $('ax-mid-' + k).textContent = labels[1];
+        $('ax-right-' + k).textContent = labels[2];
+      });
+
+      if (s.cpu.length === 0 && n) {
+        hist.forEach(h => { push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs); });
+      } else {
+        push(s.cpu, d.cpu); push(s.mem, d.mem_pct); push(s.rx, d.rx_kbs); push(s.tx, d.tx_kbs);
+      }
+
+      draw($('c-cpu'), [{ data: s.cpu, max: 100, color: '#e05a72', fill: 'rgba(224,90,114,0.12)' }], 100, '%');
+      draw($('c-mem'), [{ data: s.mem, max: 100, color: '#6ea8fe', fill: 'rgba(110,168,254,0.10)' }], 100, '%');
+      // 网络纵轴取整到好看的档（10/20/50/100…），避免出现 74 这种怪刻度
+      const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
+      const peak = Math.max.apply(null, s.rx.concat(s.tx).concat([0]));
+      const netMax = NICE.find(v => v >= peak * 1.15) || NICE[NICE.length - 1];
+      draw($('c-net'), [
+        { data: s.rx, max: netMax, color: '#3ecf8e', fill: 'rgba(62,207,142,0.10)' },
+        { data: s.tx, max: netMax, color: '#e0a35a', fill: 'rgba(224,163,90,0.10)' }
+      ], netMax, '');
+
+      renderServices(d.services);
+    } catch (e) {}
+  }
+  tick(); setInterval(tick, 3000);
+  window.addEventListener('resize', tick);
+})();
+</script>
 </body>
 </html>

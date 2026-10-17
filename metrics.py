@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections import deque
@@ -131,3 +132,93 @@ def last() -> dict:
     if _latest is None:
         return sample()
     return _latest
+
+
+# ---------- 按服务/容器拆分（cgroup v2） ----------
+
+CGROUP_ROOT = "/sys/fs/cgroup/system.slice"
+NAMES_PATH = "/var/lib/lyco-portal-ceil/containers.json"   # 由 lyco-container-names.timer 生成
+_prev_cg: dict[str, tuple[float, int]] = {}
+
+
+def _read_int(path: str) -> int:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except Exception:
+        return 0
+
+
+def _cg_cpu_usec(directory: str) -> int:
+    try:
+        with open(os.path.join(directory, "cpu.stat"), "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("usage_usec"):
+                    return int(line.split()[1])
+    except Exception:
+        pass
+    return 0
+
+
+def _container_names() -> dict[str, str]:
+    try:
+        with open(NAMES_PATH, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def services(limit: int = 8) -> list[dict]:
+    """按 cgroup 统计每个服务/容器的内存与 CPU 占用，按内存降序取前 limit 个。
+
+    CPU 是两次调用的差值，所以第一次调用会全是 0（页面每 3 秒调一次，很快就正常）。
+    """
+    names = _container_names()
+    now = time.time()
+    cores = os.cpu_count() or 1
+    try:
+        entries = os.listdir(CGROUP_ROOT)
+    except OSError:
+        return []
+
+    total_mb = _meminfo().get("MemTotal", 0) / 1024.0 or 1.0
+    rows = []
+    for entry in entries:
+        is_container = entry.startswith("docker-") and entry.endswith(".scope")
+        is_unit = entry.endswith(".service")
+        if not (is_container or is_unit):
+            continue
+        directory = os.path.join(CGROUP_ROOT, entry)
+        mem = _read_int(os.path.join(directory, "memory.current"))
+        if mem <= 0:
+            continue
+        if is_container:
+            cid = entry[len("docker-"):-len(".scope")]
+            label = names.get(cid) or cid[:12]
+            kind = "container"
+        else:
+            label = entry[:-len(".service")]
+            kind = "service"
+            if label.startswith(("systemd-", "user@", "getty@", "cron", "dbus", "polkit")):
+                continue
+
+        usec = _cg_cpu_usec(directory)
+        prev = _prev_cg.get(entry)
+        cpu_pct = 0.0
+        if prev is not None:
+            dt = now - prev[0]
+            if dt > 0.2:
+                cpu_pct = max(0.0, (usec - prev[1]) / 1e6 / dt / cores * 100.0)
+        _prev_cg[entry] = (now, usec)
+
+        mem_mb = round(mem / 1048576.0, 1)
+        rows.append({
+            "name": label,
+            "kind": kind,
+            "mem_mb": mem_mb,
+            "mem_pct": round(100.0 * mem_mb / total_mb, 1),
+            "cpu": round(min(cpu_pct, 100.0 * cores), 1),
+        })
+
+    rows.sort(key=lambda r: r["mem_mb"], reverse=True)
+    return rows[:limit]

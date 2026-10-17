@@ -4,7 +4,7 @@ panel-gate — 服务器统一管理入口
 
 职责：
   1. 一个登录页（单密码），会话 cookie 设在 PORTAL_COOKIE_DOMAIN，各子域共用
-  2. 首页列出四个面板的卡片 + 实时状态（服务端探活，不依赖浏览器）
+  2. 首页列出各服务的卡片 + 实时状态（服务端探活，不依赖浏览器）
   3. 编辑页：改卡片（名称/地址/探活目标/开关）、改密码 —— 不碰代码
   4. /auth 给 nginx 的 auth_request 用：校验 cookie，返回 200/401
 
@@ -244,7 +244,7 @@ def safe_next(target: str) -> bool:
 
 
 def stats_strip() -> str:
-    """首页顶部的资源概览：四个数字 + 进详情页的入口。"""
+    """首页顶部的资源概览数字。"""
     try:
         m = metrics.last()
     except Exception:
@@ -257,9 +257,7 @@ def stats_strip() -> str:
     ]
     body = "".join('<div class="stat-strip-item"><span class="k">{}</span>'
                    '<span class="v">{}</span></div>'.format(k, v) for k, v in cells)
-    return ('<section class="stat-strip" aria-label="资源占用">'
-            + body
-            + '<a class="stat-strip-link" href="/stats">详情 →</a></section>')
+    return '<section class="stat-strip" aria-label="资源占用">' + body + '</section>'
 
 
 def brand_mark(title: str) -> str:
@@ -454,9 +452,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(self.render("admin.html", rows=admin_rows(self.cfg["services"]),
                                      msg_block="", path=CFG_PATH))
         if path == "/stats":
-            return self._send(self.render("stats.html"))
+            return self._redirect("/")      # 资源已经并在首页，旧书签回到首页
         if path == "/api/metrics":
-            return self._send(json.dumps(metrics.sample(), ensure_ascii=False).encode("utf-8"),
+            payload = metrics.sample()
+            payload["services"] = metrics.services()
+            return self._send(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                               200, "application/json; charset=utf-8",
                               extra=["Cache-Control: no-store"])
         if path == "/detail":
