@@ -146,7 +146,9 @@ sudo journalctl -u lyco-control --no-pager -n 30
 
 ## 资源指标
 
-`metrics.py` 只读 `/proc`、`statvfs` 和 cgroup v2，不装 agent。页面每 3 秒拉一次 `/api/metrics`，历史保留 120 个点（约 6 分钟）。
+`metrics.py` 只读 `/proc`、`statvfs` 和 cgroup v2，不装 agent。后端每 3 秒采一次，按分钟聚合成 1440 个点——也就是 **24 小时**的窗口；页面每 3 秒读一次 `/api/metrics` 拿快照。
+
+历史只存在内存里，服务或机器重启即清零，从空白重新积累（不落盘、不写数据库）。
 
 返回内容：CPU 与内存百分比、磁盘用量、load、uptime、上下行速率，以及 `services[]`（按 cgroup 统计每个服务或容器的内存与 CPU，按内存降序）。
 

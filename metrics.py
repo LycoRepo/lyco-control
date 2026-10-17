@@ -12,7 +12,8 @@ import threading
 import time
 from collections import deque
 
-HISTORY_LEN = 120          # 3 秒一次 → 约 6 分钟
+BUCKET_SECONDS = 60        # 历史按分钟聚合：3 秒一采，一分钟一个点
+HISTORY_LEN = 24 * 60      # 1440 个点 → 24 小时
 _last_cpu: tuple[int, int] | None = None   # (busy, total)
 _last_net: tuple[float, int, int] | None = None  # (ts, rx, tx)
 _last_sample_ts = 0.0
@@ -103,7 +104,19 @@ def sample() -> dict:
         "rx_kbs": round(rx_kbs, 1),
         "tx_kbs": round(tx_kbs, 1),
     }
-    history.append(item)
+    # 写进当前这一分钟的桶：同一分钟内的采样做平均，跨分钟才新增一个点
+    minute = int(now // BUCKET_SECONDS) * BUCKET_SECONDS
+    if history and history[-1]["ts"] == minute:
+        b = history[-1]
+        n = b["n"] + 1
+        b["cpu"] = (b["cpu"] * (n - 1) + item["cpu"]) / n
+        b["mem_pct"] = (b["mem_pct"] * (n - 1) + item["mem_pct"]) / n
+        b["rx_kbs"] = (b["rx_kbs"] * (n - 1) + item["rx_kbs"]) / n
+        b["tx_kbs"] = (b["tx_kbs"] * (n - 1) + item["tx_kbs"]) / n
+        b["n"] = n
+    else:
+        history.append({"ts": minute, "cpu": item["cpu"], "mem_pct": item["mem_pct"],
+                        "rx_kbs": item["rx_kbs"], "tx_kbs": item["tx_kbs"], "n": 1})
 
     result = {
         **item,
@@ -122,7 +135,11 @@ def sample() -> dict:
             "free_gb": round(disk_free / 1024 ** 3, 1),
             "pct": round(100.0 * disk_used / disk_total, 1) if disk_total else 0.0,
         },
-        "history": list(history),
+        "history": [
+            {"ts": b["ts"], "cpu": round(b["cpu"], 2), "mem_pct": round(b["mem_pct"], 2),
+             "rx_kbs": round(b["rx_kbs"], 1), "tx_kbs": round(b["tx_kbs"], 1)}
+            for b in history
+        ],
     }
     _latest = result
     return result

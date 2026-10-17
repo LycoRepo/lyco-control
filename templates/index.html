@@ -79,7 +79,7 @@ $stats_strip
 <script>
 (function () {
   const $ = id => document.getElementById(id);
-  const s = { cpu: [], mem: [], rx: [], tx: [] };
+  const s = { cpu: [], mem: [], rx: [], tx: [], ts: [] };
   if (!$('c-cpu')) return;
 
   const H = 120;   // 逻辑高度固定：绝不能再从 canvas 属性里读（那会被自己越写越大）
@@ -94,7 +94,7 @@ $stats_strip
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     return { ctx, w, h: H };
   }
-  function draw(c, series, axisMax, unit) {
+  function draw(c, series, axisMax, unit, t0, t1) {
     const { ctx, w, h } = fit(c);
     ctx.clearRect(0, 0, w, h);
     ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
@@ -112,21 +112,25 @@ $stats_strip
       c.dataset.axis = String(axisMax) + (unit || '');
     }
     const pad = 2;
+    const span = Math.max(1, t1 - t0);
+    const xAt = ts => pad + (w - pad * 2) * Math.min(1, Math.max(0, (ts - t0) / span));
     series.forEach(x => {
-      const pts = x.data;
+      const pts = x.data, ts = x.ts || [];
       if (pts.length < 2) return;
       ctx.beginPath();
       pts.forEach((v, i) => {
-        const px = pad + (w - pad * 2) * (i / (pts.length - 1));
+        const px = xAt(ts[i] ?? t1);
         const py = h - pad - (h - pad * 2) * Math.min(1, v / x.max);
         i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
       });
       ctx.strokeStyle = x.color; ctx.lineWidth = 1.6; ctx.stroke();
-      ctx.lineTo(w - pad, h - pad); ctx.lineTo(pad, h - pad); ctx.closePath();
+      ctx.lineTo(xAt(ts[pts.length - 1] ?? t1), h - pad);
+      ctx.lineTo(xAt(ts[0] ?? t0), h - pad);
+      ctx.closePath();
       ctx.fillStyle = x.fill; ctx.fill();
     });
   }
-  function push(a, v) { a.push(v); if (a.length > 120) a.shift(); }
+  function push(a, v) { a.push(v); if (a.length > 1440) a.shift(); }   // 与后端一致：一分钟一个点，24 小时
 
   function renderServices(list) {
     const tb = $('svc-rows');
@@ -155,44 +159,51 @@ $stats_strip
       const hist = Array.isArray(d.history) ? d.history : [];
       const n = hist.length;
       const spanSec = Math.max(0, d.ts - (hist[0] ? hist[0].ts : d.ts));
+      const t1 = d.ts, t0 = d.ts - 24 * 3600;      // 固定 24 小时窗口
+      const winSec = t1 - t0;
       const clock = ts => {
         const dt = new Date(ts * 1000);
         const hh = String(dt.getHours()).padStart(2, '0');
         const mm = String(dt.getMinutes()).padStart(2, '0');
-        if (spanSec < 120) return hh + ':' + mm + ':' + String(dt.getSeconds()).padStart(2, '0');
+        if (winSec < 120) return hh + ':' + mm + ':' + String(dt.getSeconds()).padStart(2, '0');
+        if (winSec >= 20 * 3600) return (dt.getMonth() + 1) + '-' + dt.getDate() + ' ' + hh + ':' + mm;
         return hh + ':' + mm;
       };
       const human = sec => {
         if (sec < 90) return Math.round(sec) + ' 秒';
         if (sec < 3600) return Math.round(sec / 60) + ' 分钟';
-        return (sec / 3600).toFixed(1) + ' 小时';
+        const h = sec / 3600;
+        return (h >= 10 ? Math.round(h) : h.toFixed(1)) + ' 小时';
       };
-      $('span').textContent = n < 2 ? '刚启动，正在积累' : '最近 ' + human(spanSec);
+      $('span').textContent = n < 2 ? '刚启动，正在积累'
+        : '已积累 ' + human(spanSec) + ' / 24 小时';
 
-      const labels = n < 2 ? ['—', '—', '现在']
-        : [clock(hist[0].ts), clock(Math.round((hist[0].ts + d.ts) / 2)), clock(d.ts)];
+      const labels = [clock(t0), clock(Math.round((t0 + t1) / 2)), clock(t1)];
       ['1', '2', '3'].forEach(k => {
         $('ax-left-' + k).textContent = labels[0];
         $('ax-mid-' + k).textContent = labels[1];
         $('ax-right-' + k).textContent = labels[2];
       });
 
+      const lastTs = hist.length ? hist[hist.length - 1].ts : null;
       if (s.cpu.length === 0 && n) {
-        hist.forEach(h => { push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs); });
-      } else {
-        push(s.cpu, d.cpu); push(s.mem, d.mem_pct); push(s.rx, d.rx_kbs); push(s.tx, d.tx_kbs);
+        hist.forEach(h => { push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs); });
+      } else if (lastTs !== null && s.ts[s.ts.length - 1] !== lastTs) {
+        // 后端是分钟桶：只有开了新桶才加点，别每个 tick 都塞
+        const h = hist[hist.length - 1];
+        push(s.ts, h.ts); push(s.cpu, h.cpu); push(s.mem, h.mem_pct); push(s.rx, h.rx_kbs); push(s.tx, h.tx_kbs);
       }
 
-      draw($('c-cpu'), [{ data: s.cpu, max: 100, color: '#e05a72', fill: 'rgba(224,90,114,0.12)' }], 100, '%');
-      draw($('c-mem'), [{ data: s.mem, max: 100, color: '#6ea8fe', fill: 'rgba(110,168,254,0.10)' }], 100, '%');
+      draw($('c-cpu'), [{ data: s.cpu, ts: s.ts, max: 100, color: '#e05a72', fill: 'rgba(224,90,114,0.12)' }], 100, '%', t0, t1);
+      draw($('c-mem'), [{ data: s.mem, ts: s.ts, max: 100, color: '#6ea8fe', fill: 'rgba(110,168,254,0.10)' }], 100, '%', t0, t1);
       // 网络纵轴取整到好看的档（10/20/50/100…），避免出现 74 这种怪刻度
       const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000];
       const peak = Math.max.apply(null, s.rx.concat(s.tx).concat([0]));
       const netMax = NICE.find(v => v >= peak * 1.15) || NICE[NICE.length - 1];
       draw($('c-net'), [
-        { data: s.rx, max: netMax, color: '#3ecf8e', fill: 'rgba(62,207,142,0.10)' },
-        { data: s.tx, max: netMax, color: '#e0a35a', fill: 'rgba(224,163,90,0.10)' }
-      ], netMax, '');
+        { data: s.rx, ts: s.ts, max: netMax, color: '#3ecf8e', fill: 'rgba(62,207,142,0.10)' },
+        { data: s.tx, ts: s.ts, max: netMax, color: '#e0a35a', fill: 'rgba(224,163,90,0.10)' }
+      ], netMax, '', t0, t1);
 
       renderServices(d.services);
     } catch (e) {}
