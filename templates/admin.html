@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>编辑 · $title</title>
+<link rel="icon" href="/static/icon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="bar-inner">
+    <div class="brand"><a class="brand-link" href="/"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></a></div>
+    <nav class="topnav" aria-label="主导航">
+      <a class="navlink" href="/">返回</a>
+      <a class="navlink" href="/logout">退出</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap admin-wrap">
+  <h1 class="sr-only">编辑入口</h1>
+  <section class="panel" aria-labelledby="name-title">
+    <div class="panel-heading">
+      <h2 class="panel-title" id="name-title">名称</h2>
+      <p class="panel-hint">左上角显示的名字，浏览器标题也用它。</p>
+    </div>
+    <form method="post" action="/admin/title" class="stack narrow">
+      <label class="field"><span class="field-label">标题</span>
+        <input type="text" name="title" value="$title_attr" maxlength="40" required></label>
+      <button type="submit" class="btn primary">保存名称</button>
+    </form>
+  </section>
+
+  <section class="panel" aria-labelledby="cards-title">
+    <div class="panel-heading">
+      <h2 class="panel-title" id="cards-title">卡片</h2>
+      <p class="panel-hint">改名、改地址、关掉某个卡片，都不用改代码。改完点保存。探活地址留空、只填服务单元时，按 systemd 状态判断在线（没有毫秒数）。</p>
+    </div>
+    $msg_block
+    <form method="post" action="/admin/services">
+      <div class="table-scroll" tabindex="0" role="region" aria-label="卡片配置表格，可左右滚动">
+        <table class="table">
+          <caption class="sr-only">卡片配置，改完点保存。</caption>
+          <thead>
+            <tr><th scope="col">图标</th><th scope="col">名称</th><th scope="col">说明</th><th scope="col">链接</th><th scope="col">探活地址</th><th scope="col">服务单元</th><th scope="col">日志文件</th><th scope="col">启用</th></tr>
+          </thead>
+          <tbody id="rows">
+$rows
+          </tbody>
+        </table>
+      </div>
+      <p class="table-help">左右滑动表格，改完点保存。</p>
+      <div class="row-actions">
+        <button type="button" class="btn ghost" onclick="addRow()">+ 加一行</button>
+        <button type="submit" class="btn primary">保存卡片</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="panel password-panel" aria-labelledby="password-title">
+    <div class="panel-heading">
+      <h2 class="panel-title" id="password-title">密码</h2>
+      <p class="panel-hint">改的是这个入口的密码，跟四个面板自己的密码无关。</p>
+    </div>
+    <form method="post" action="/admin/password" class="stack narrow">
+      <label class="field"><span class="field-label">原密码</span>
+        <input type="password" name="old" autocomplete="current-password" required></label>
+      <label class="field"><span class="field-label">新密码（至少 10 位）</span>
+        <input type="password" name="new" autocomplete="new-password" required></label>
+      <label class="field"><span class="field-label">再输一次</span>
+        <input type="password" name="confirm" autocomplete="new-password" required></label>
+      <button type="submit" class="btn primary">更新密码</button>
+    </form>
+  </section>
+
+  <footer class="foot">配置文件：<span class="file-path">$path</span></footer>
+</main>
+
+<script>
+function addRow() {
+  const tb = document.getElementById('rows');
+  const i = tb.querySelectorAll('tr').length;
+  const tr = document.createElement('tr');
+  tr.innerHTML = [
+    '<td><input name="icon_' + i + '" value="•" class="w-icon"></td>',
+    '<td><input name="name_' + i + '" value="" class="w-name" placeholder="新卡片"></td>',
+    '<td><input name="desc_' + i + '" value="" class="w-desc"></td>',
+    '<td><input name="url_' + i + '" value="https://" class="w-url"></td>',
+    '<td><input name="check_' + i + '" value="http://127.0.0.1:" class="w-check"></td>',
+    '<td><input name="unit_' + i + '" value="" class="w-unit" placeholder="xxx.service"></td>',
+    '<td><input name="log_' + i + '" value="" class="w-log" placeholder="/var/log/xxx.log"></td>',
+    '<td class="center"><input type="checkbox" name="enabled_' + i + '" checked></td>'
+  ].join('');
+  tb.appendChild(tr);
+}
+</script>
+</body>
+</html>

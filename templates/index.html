@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>$title</title>
+<link rel="icon" href="/static/icon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="bar-inner">
+    <div class="brand"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></div>
+    <nav class="topnav" aria-label="主导航">
+      <a class="navlink" href="/admin">编辑</a>
+      <a class="navlink" href="/logout">退出</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero" aria-labelledby="page-title">
+    <p class="hero-kicker">私人控制台</p>
+    <h1 class="hero-title" id="page-title">服务器入口</h1>
+  </section>
+
+  <section class="grid" aria-label="服务入口">
+$cards
+  </section>
+
+  <footer class="foot">状态于 <time>$when</time> 检查 · 数据来自服务端探活</footer>
+</main>
+</body>
+</html>

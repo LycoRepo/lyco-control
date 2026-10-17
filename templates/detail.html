@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>$name · $title</title>
+<link rel="icon" href="/static/icon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="bar-inner">
+    <div class="brand"><a class="brand-link" href="/"><img class="brand-img" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true"><span class="brand-name">$title</span></a></div>
+    <nav class="topnav" aria-label="主导航">
+      <a class="navlink" href="/">返回</a>
+      <a class="navlink" href="/admin">编辑</a>
+      <a class="navlink" href="/logout">退出</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="hero">
+    <p class="hero-kicker">服务详情</p>
+    <h1 class="hero-title">$name</h1>
+    <p class="hero-sub">$desc</p>
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">运行状态</h2>
+    <div class="table-scroll">
+      <table class="table">
+        <tbody>
+          <tr><th>systemd 单元</th><td>$unit</td></tr>
+          <tr><th>运行中</th><td><span class="pill $active_cls">$active</span></td></tr>
+          <tr><th>开机自启</th><td><span class="pill $enabled_cls">$enabled</span></td></tr>
+          <tr><th>常驻内存</th><td>$rss MB</td></tr>
+          <tr><th>探活</th><td><span class="pill $health_cls">$health_text</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <pre class="logbox">$health_detail</pre>
+  </section>
+
+  <section class="panel">
+    <h2 class="panel-title">最近日志</h2>
+    <pre class="logbox">$log</pre>
+  </section>
+
+  <footer class="foot">这一页是门户直读的：systemd 状态、/proc 里的内存、探活响应、日志尾。</footer>
+</main>
+</body>
+</html>

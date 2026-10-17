@@ -1,0 +1,13 @@
+# 运行时生成的配置（含密码哈希与会话密钥，绝不入库）
+portal.json
+portal.json.tmp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 本地测试残留
+*.log
+tmp-test.json

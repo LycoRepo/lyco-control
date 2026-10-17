@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>设置密码 · $title</title>
+<link rel="icon" href="/static/icon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="centered">
+<main class="authbox">
+  <h1 class="auth-title">第一次使用</h1>
+  <p class="auth-sub">给这个入口设一个密码，之后四个面板都用它。</p>
+  $error_block
+  <form method="post" action="/setup" class="stack">
+    <label class="field">
+      <span class="field-label">密码（至少 10 位）</span>
+      <input type="password" name="password" autofocus autocomplete="new-password" required>
+    </label>
+    <label class="field">
+      <span class="field-label">再输一次</span>
+      <input type="password" name="confirm" autocomplete="new-password" required>
+    </label>
+    <button type="submit" class="btn primary">保存并进入</button>
+  </form>
+</main>
+</body>
+</html>

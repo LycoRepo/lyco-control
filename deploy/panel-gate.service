@@ -1,0 +1,24 @@
+[Unit]
+Description=Panel Gate — single entry for local admin panels
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=portal
+Group=portal
+WorkingDirectory=/srv/panel-gate
+Environment=PORTAL_CONFIG=/srv/panel-gate/portal.json
+Environment=PORTAL_PORT=7900
+Environment=PORTAL_BIND=127.0.0.1
+# 会话 cookie 的域：填 .example.com 让所有子域共用一次登录；留空则只对当前主机生效
+Environment=PORTAL_COOKIE_DOMAIN=.example.com
+# 上了 HTTPS 之后改成 1
+Environment=PORTAL_SECURE=0
+Environment=PORTAL_TITLE=Server Panel
+ExecStart=/usr/bin/python3 /srv/panel-gate/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

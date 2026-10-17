@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>登录 · $title</title>
+<link rel="icon" href="/static/icon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icon-32.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="centered">
+<main class="authbox" aria-labelledby="login-title">
+  <img class="brand-img auth-mark" src="/static/icon-192.png" alt="" width="34" height="34" aria-hidden="true">
+  <h1 class="auth-title" id="login-title">$title</h1>
+  <p class="auth-sub">输入访问密码</p>
+  $error_block
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="next" value="$next">
+    <label class="field">
+      <span class="field-label">密码</span>
+      <input type="password" name="password" autofocus autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="btn primary">进入</button>
+  </form>
+</main>
+</body>
+</html>
