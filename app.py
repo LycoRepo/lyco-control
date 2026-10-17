@@ -310,14 +310,15 @@ def metrics_block_html(cfg: dict) -> str:
     checked = " checked" if mx.get("persist") else ""
     hours = mx.get("hours", 24)
     st = metrics.state()
-    note = ("当前：落盘（文件 {}，共 {} 点）".format(html_mod.escape(st["file"]), st["points"])
-            if st["persist"] else "当前：只在内存，重启即清零（共 {} 点）".format(st["points"]))
+    # 注意用词：这些数据放 /run（内存盘），全程不写磁盘，别叫它"落盘"。
+    note = ("当前：存在 /run 内存盘（不写磁盘，机器重启会清空）· 共 {} 点".format(st["points"])
+            if st["persist"] else "当前：只在进程内存里 · 共 {} 点（服务一重启就清零）".format(st["points"]))
     return (
         '<form method="post" action="/admin/metrics" class="stack narrow">'
         '<label class="field"><span class="field-label">保留时长（小时）</span>'
         '<input type="number" name="hours" min="1" max="168" step="1" value="{}" required></label>'
         '<label class="check"><input type="checkbox" name="persist" value="1"{}> '
-        '重启后接着画（写文件，约每点 30 字节/分钟一次覆盖）</label>'
+        '服务重启后接着画（存 /run 内存盘，不写磁盘；机器重启清空）</label>'
         '<p class="panel-hint">{}</p>'
         '<button type="submit" class="btn primary">保存资源设置</button>'
         '</form>'
