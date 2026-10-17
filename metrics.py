@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections import deque
 
@@ -125,6 +126,32 @@ def sample() -> dict:
     }
     _latest = result
     return result
+
+
+SAMPLER_INTERVAL = 3.0     # 后端自己按这个节奏采样，与有多少客户端访问无关
+_sampler_started = False
+
+
+def _sampler_loop() -> None:
+    while True:
+        try:
+            sample()
+        except Exception:
+            pass
+        time.sleep(SAMPLER_INTERVAL)
+
+
+def ensure_sampler() -> None:
+    """启动后台采样线程；重复调用无副作用。
+
+    历史必须按固定节奏记录：早先的实现是「每次请求记一个点」，于是标签页开两个、
+    或者有人直接 curl 接口，点数攒得比时间快，120 个点只覆盖两三分钟。
+    """
+    global _sampler_started
+    if _sampler_started:
+        return
+    _sampler_started = True
+    threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
 
 
 def last() -> dict:

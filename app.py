@@ -454,7 +454,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/stats":
             return self._redirect("/")      # 资源已经并在首页，旧书签回到首页
         if path == "/api/metrics":
-            payload = metrics.sample()
+            metrics.ensure_sampler()
+            payload = metrics.last()
             payload["services"] = metrics.services()
             return self._send(json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                               200, "application/json; charset=utf-8",
@@ -778,6 +779,7 @@ def main() -> None:
     threading.Thread(target=_sampler, daemon=True).start()
 
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    metrics.ensure_sampler()      # 开机就开始按固定节奏记历史，不必等有人访问
     print("lyco-control on http://{}:{}/ (config {})".format(BIND, PORT, CFG_PATH), flush=True)
     if COOKIE_DOMAIN and not SECURE_COOKIE:
         print("警告：PORTAL_COOKIE_DOMAIN={} 但 PORTAL_SECURE=0 —— 上 HTTPS 后务必改成 1"
