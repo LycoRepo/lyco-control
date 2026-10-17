@@ -111,6 +111,9 @@ sudo journalctl -u lyco-control --no-pager -n 30
 | `PORTAL_SECURE` | `0` | HTTPS 就绪后设 1，cookie 加 `Secure` |
 | `PORTAL_SESSION_HOURS` | `8` | 登录有效期（小时） |
 | `PORTAL_LOGIN_LOG` | 空 | 登录审计日志路径；记录成功/失败、IP、时间，超 1 MB 自动轮转 |
+| `PORTAL_METRICS_HOURS` | `24` | 资源曲线窗口长度（小时）；每分钟一个点 |
+| `PORTAL_METRICS_PERSIST` | `0` | 设 `1` 时把历史写进文件，重启后接着画；默认只在内存里 |
+| `PORTAL_METRICS_FILE` | `metrics-history.json` | 落盘路径；仅在 `PORTAL_METRICS_PERSIST=1` 时有效 |
 
 ### `portal.json` 里的卡片
 
@@ -148,7 +151,14 @@ sudo journalctl -u lyco-control --no-pager -n 30
 
 `metrics.py` 只读 `/proc`、`statvfs` 和 cgroup v2，不装 agent。后端每 3 秒采一次，按分钟聚合成 1440 个点——也就是 **24 小时**的窗口；页面每 3 秒读一次 `/api/metrics` 拿快照。
 
-历史只存在内存里，服务或机器重启即清零，从空白重新积累（不落盘、不写数据库）。
+**要不要落盘，部署时自己选**：
+
+| `PORTAL_METRICS_PERSIST` | 行为 | 代价 |
+|---|---|---|
+| `0`（默认） | 历史只在内存，服务或机器重启即清零 | 无磁盘写入；每次重启要重新攒 |
+| `1` | 每分钟写一次文件，重启后接着上一次的曲线 | 约 300 KB，每分钟覆盖写入 |
+
+落盘时重启期间的空白补不上——只会接着上次的点继续画。窗口长度用 `PORTAL_METRICS_HOURS` 调，改大只会让内存和文件按比例变大（每小时 60 个点）。
 
 返回内容：CPU 与内存百分比、磁盘用量、load、uptime、上下行速率，以及 `services[]`（按 cgroup 统计每个服务或容器的内存与 CPU，按内存降序）。
 

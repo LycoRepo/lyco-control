@@ -130,7 +130,7 @@ $stats_strip
       ctx.fillStyle = x.fill; ctx.fill();
     });
   }
-  function push(a, v) { a.push(v); if (a.length > 1440) a.shift(); }   // 与后端一致：一分钟一个点，24 小时
+  function push(a, v) { a.push(v); if (a.length > 4320) a.shift(); }   // 上限留够（最多 72 小时），实际窗口跟随后端
 
   function renderServices(list) {
     const tb = $('svc-rows');
@@ -159,7 +159,8 @@ $stats_strip
       const hist = Array.isArray(d.history) ? d.history : [];
       const n = hist.length;
       const spanSec = Math.max(0, d.ts - (hist[0] ? hist[0].ts : d.ts));
-      const t1 = d.ts, t0 = d.ts - 24 * 3600;      // 固定 24 小时窗口
+      const HOURS = d.hours || 24;                 // 窗口长度由后端给（PORTAL_METRICS_HOURS）
+      const t1 = d.ts, t0 = d.ts - HOURS * 3600;
       const winSec = t1 - t0;
       const clock = ts => {
         const dt = new Date(ts * 1000);
@@ -176,7 +177,7 @@ $stats_strip
         return (h >= 10 ? Math.round(h) : h.toFixed(1)) + ' 小时';
       };
       $('span').textContent = n < 2 ? '刚启动，正在积累'
-        : '已积累 ' + human(spanSec) + ' / 24 小时';
+        : '已积累 ' + human(spanSec) + ' / ' + HOURS + ' 小时';
 
       const labels = [clock(t0), clock(Math.round((t0 + t1) / 2)), clock(t1)];
       ['1', '2', '3'].forEach(k => {

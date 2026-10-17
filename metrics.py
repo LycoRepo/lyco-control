@@ -2,7 +2,7 @@
 
 设计取舍：
 - CPU / 网络是「两次采样的差值」，所以进程内保留上一次的时间戳；
-- 历史放在内存环形缓冲里，进程重启即清空（这是看「最近几分钟」的面板，不做长期存储）。
+- 历史默认只在内存环形缓冲里，进程重启即清空；PORTAL_METRICS_PERSIST=1 时才写到文件。
 """
 from __future__ import annotations
 
@@ -13,7 +13,16 @@ import time
 from collections import deque
 
 BUCKET_SECONDS = 60        # 历史按分钟聚合：3 秒一采，一分钟一个点
-HISTORY_LEN = 24 * 60      # 1440 个点 → 24 小时
+HISTORY_HOURS = int(os.environ.get("PORTAL_METRICS_HOURS", "24") or 24)   # 窗口长度，可调
+HISTORY_LEN = max(1, HISTORY_HOURS * 60)
+
+# 要不要把历史写进文件。默认关：只在内存里，重启清零。
+# 开了之后重启/机器重启都能接着上一次的曲线往下画（重启期间的空白补不上）。
+PERSIST = os.environ.get("PORTAL_METRICS_PERSIST", "0").strip().lower() in ("1", "true", "yes", "on")
+PERSIST_FILE = os.path.expanduser(os.environ.get("PORTAL_METRICS_FILE", "") or
+                                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics-history.json"))
+PERSIST_EVERY = 60.0
+_last_save = 0.0
 _last_cpu: tuple[int, int] | None = None   # (busy, total)
 _last_net: tuple[float, int, int] | None = None  # (ts, rx, tx)
 _last_sample_ts = 0.0
@@ -117,11 +126,13 @@ def sample() -> dict:
     else:
         history.append({"ts": minute, "cpu": item["cpu"], "mem_pct": item["mem_pct"],
                         "rx_kbs": item["rx_kbs"], "tx_kbs": item["tx_kbs"], "n": 1})
+    _maybe_save(now)
 
     result = {
         **item,
         "load": [round(load1, 2), round(load5, 2), round(load15, 2)],
         "uptime_h": round(uptime_s / 3600.0, 1),
+        "hours": HISTORY_HOURS,
         "mem": {
             "total_mb": round(total_kb / 1024.0),
             "used_mb": round(used_kb / 1024.0),
@@ -168,7 +179,53 @@ def ensure_sampler() -> None:
     if _sampler_started:
         return
     _sampler_started = True
+    load_history()
     threading.Thread(target=_sampler_loop, name="metrics-sampler", daemon=True).start()
+
+
+def _save_history() -> None:
+    """把分钟桶写成一个紧凑数组文件；失败只吞掉，不影响采样。
+
+    开关关掉时直接返回——这道判断必须写在函数里面，不能只靠调用方自觉。
+    """
+    if not PERSIST:
+        return
+    tmp = PERSIST_FILE + ".tmp"
+    try:
+        payload = {"hours": HISTORY_HOURS, "saved": time.time(),
+                   "buckets": [[b["ts"], round(b["cpu"], 2), round(b["mem_pct"], 2),
+                                round(b["rx_kbs"], 1), round(b["tx_kbs"], 1)] for b in history]}
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, separators=(",", ":"))
+        os.replace(tmp, PERSIST_FILE)
+    except Exception:
+        pass
+
+
+def _maybe_save(now: float) -> None:
+    global _last_save
+    if not PERSIST or now - _last_save < PERSIST_EVERY:
+        return
+    _last_save = now
+    _save_history()
+
+
+def load_history() -> int:
+    """启动时读回落盘的历史，丢掉超出窗口的点。返回读回的点数。开关关掉时直接 0。"""
+    if not PERSIST:
+        return 0
+    try:
+        with open(PERSIST_FILE, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        cutoff = time.time() - HISTORY_LEN * BUCKET_SECONDS
+        rows = [r for r in data.get("buckets", []) if len(r) == 5 and r[0] >= cutoff]
+        history.clear()
+        for ts, cpu, mem, rx, tx in rows:
+            history.append({"ts": int(ts), "cpu": cpu, "mem_pct": mem,
+                            "rx_kbs": rx, "tx_kbs": tx, "n": 1})
+        return len(history)
+    except Exception:
+        return 0
 
 
 def last() -> dict:
