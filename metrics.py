@@ -32,6 +32,8 @@ _last_sample_ts = 0.0
 _latest: dict | None = None
 _last_ok = 0.0
 _last_error: str | None = None
+_svc_ok = 0.0
+_svc_error: str | None = None
 
 history: deque[dict] = deque(maxlen=HISTORY_LEN)
 _lock = threading.Lock()          # 保护 history / _prev_cg / _latest_services
@@ -174,12 +176,15 @@ _sampler_started = False
 
 def _sampler_loop() -> None:
     while True:
-        global _last_error
+        global _last_error, _svc_error
         try:
             sample()
-            services()          # cgroup 基线也走固定节奏，多客户端不会互相干扰
         except Exception as exc:
             _last_error = "{}: {}".format(type(exc).__name__, str(exc)[:120])
+        try:
+            services()          # cgroup 基线也走固定节奏，多客户端不会互相干扰
+        except Exception as exc:
+            _svc_error = "{}: {}".format(type(exc).__name__, str(exc)[:120])
         time.sleep(SAMPLER_INTERVAL)
 
 
@@ -295,10 +300,17 @@ def last() -> dict:
     if _latest is None:
         return sample()
     data = dict(_latest)
-    age = time.time() - _last_ok if _last_ok else None
-    data["degraded"] = bool(_last_error) or (age is not None and age > 15)
-    if _last_error:
-        data["error"] = _last_error
+    now = time.time()
+    host_age = now - _last_ok if _last_ok else None
+    svc_age = now - _svc_ok if _svc_ok else None
+    data["degraded"] = (
+        bool(_last_error) or bool(_svc_error)
+        or (host_age is not None and host_age > 15)
+        or (svc_age is not None and svc_age > 20)
+    )
+    err = _last_error or _svc_error
+    if err:
+        data["error"] = err
     return data
 
 
@@ -349,12 +361,14 @@ def services(limit: int = 8) -> list[dict]:
 
     CPU 是两次调用的差值，所以第一次调用会全是 0（页面每 3 秒调一次，很快就正常）。
     """
+    global _latest_services, _svc_ok, _svc_error
     names = _container_names()
     now = time.monotonic()
     cores = os.cpu_count() or 1
     try:
         entries = os.listdir(CGROUP_ROOT)
-    except OSError:
+    except OSError as exc:
+        _svc_error = "listdir: {}".format(type(exc).__name__)
         return []
 
     total_mb = _meminfo().get("MemTotal", 0) / 1024.0 or 1.0
@@ -400,9 +414,10 @@ def services(limit: int = 8) -> list[dict]:
         })
 
     rows.sort(key=lambda r: r["mem_mb"], reverse=True)
-    global _latest_services
     with _lock:
         _latest_services = rows[:limit]
+        _svc_ok = time.time()
+        _svc_error = None
         # 已经消失的 cgroup 不要把基线一直留着，否则字典只增不减
         alive = set(entries)
         for key in [k for k in _prev_cg if k not in alive]:

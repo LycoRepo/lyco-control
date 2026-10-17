@@ -434,10 +434,18 @@ class Handler(BaseHTTPRequestHandler):
             parts.append("Secure")
         return "; ".join(parts)
 
-    def _is_https(self) -> bool:
-        """反代在 X-Forwarded-Proto 里说 https 就算 https：忘了设 PORTAL_SECURE 也不会漏掉 Secure。"""
+    def _want_scheme(self) -> str | None:
+        """外部协议怎么判：显式 PORTAL_SECURE 最可信，其次反代覆盖写的 X-Forwarded-Proto。
+
+        两者都没有时返回 None——此时只比主机，不拿猜出来的协议去否掉正常提交。
+        """
+        if SECURE_COOKIE:
+            return "https"
         proto = (self.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
-        return proto == "https"
+        return proto if proto in ("http", "https") else None
+
+    def _is_https(self) -> bool:
+        return self._want_scheme() == "https"
 
     def _send(self, body: bytes, code: int = 200, ctype: str = "text/html; charset=utf-8", extra: list[str] | None = None):
         self.send_response(code)
@@ -603,24 +611,25 @@ class Handler(BaseHTTPRequestHandler):
                                              error_block=card_msg("尝试过多，请在 {} 秒后重试".format(wait), "err"),
                                              next=quote(form.get("next", "/"))), 429,
                                       extra=["Retry-After: {}".format(max(wait, 1))])
-                snap_hash = self.cfg.get("password_hash", "")
-                snap_epoch = self.cfg.get("session_epoch", "")
+                # 三个值在同一把锁里取，避免「旧哈希 + 新 epoch」这种半新半旧的快照
+                with CFG_LOCK:
+                    snap_hash = self.cfg.get("password_hash", "")
+                    snap_epoch = self.cfg.get("session_epoch", "")
+                    snap_secret = self.cfg.get("secret", "")
                 ok = verify_password(pw, snap_hash)
-                epoch_now = self.cfg.get("session_epoch", "")
+                if ok:
+                    # 复核：验证期间改过密码就作废这次通过
+                    with CFG_LOCK:
+                        ok = self.cfg.get("session_epoch", "") == snap_epoch
             finally:
                 LOGIN_SEM.release()
-            self._note_login(ok)
-            if ok and epoch_now != snap_epoch:
-                # 校验期间密码被改过：这次通过作废，按失败处理，别拿新 epoch 发旧凭证
-                return self._send(self.render("login.html",
-                                         error_block=card_msg("密码已更新，请重新登录", "err"),
-                                         next=quote(form.get("next", "/"))), 401)
+            self._note_login(ok)      # 只记最终结果：被作废的通过不能记成 OK
             if ok:
                 target = form.get("next") or "/"
                 if not safe_next(target):
                     target = "/"
                 return self._redirect(target, extra=["Set-Cookie: " + self._cookie_header(
-                    make_session(self.cfg["secret"], self.cfg["session_epoch"]), SESSION_SECONDS)])
+                    make_session(snap_secret, snap_epoch), SESSION_SECONDS)])
             time.sleep(0.4)
             return self._send(self.render("login.html", error_block=card_msg("密码错误", "err"),
                                      next=quote(form.get("next", "/"))), 401)
@@ -761,9 +770,9 @@ class Handler(BaseHTTPRequestHandler):
             host = (self.headers.get("Host", "") or "").lower()
             if origin.netloc.lower() != host:
                 return False
-            # 协议不同也算跨源（防止 https 页面被 http 提交）
-            want = "https" if self._is_https() else "http"
-            return (origin.scheme or want).lower() == want
+            # 协议不同也算跨源（防止 https 页面被 http 提交）；判不出来就只比主机
+            want = self._want_scheme()
+            return True if want is None else (origin.scheme or want).lower() == want
         except Exception:
             return False
 
@@ -873,7 +882,7 @@ class Handler(BaseHTTPRequestHandler):
                 save_config(new_cfg)
             except Exception as exc:
                 return "保存配置失败：{}".format(type(exc).__name__)
-            self.cfg.clear()
+            # 只做 update，不 clear：clear+update 之间读线程会看到空配置，直接 KeyError
             self.cfg.update(new_cfg)
         return None
 
