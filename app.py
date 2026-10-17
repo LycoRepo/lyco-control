@@ -306,14 +306,14 @@ def status_text(up, detail: str = "", ms=None) -> str:
 
 
 def metrics_block_html(cfg: dict) -> str:
-    """资源设置表单：一行数值、一行开关、一行状态、一个按钮，左边缘统一。"""
+    """资源设置。文案按「不出现术语、每句说一件事」写：看多久 / 重启后还在不在 / 现在记了多少。"""
     mx = cfg.get("metrics") or {}
     checked = " checked" if mx.get("persist") else ""
     hours = mx.get("hours", 24)
     st = metrics.state()
-    # 用词注意：数据放 /run（内存盘），不写磁盘，别叫"落盘"。
-    where = ("存在 /run 内存盘（不写磁盘），机器重启会清空" if st["persist"]
-             else "只在进程内存里，服务一重启就清零")
+    mins = st["points"]
+    kept = ("已记录 {} 分钟 · 只放内存，不写硬盘，机器重启清空".format(mins) if st["persist"]
+            else "已记录 {} 分钟 · 只放内存，服务重启清空".format(mins))
     return (
         '<form method="post" action="/admin/metrics" class="settings">'
         '<div class="settings-row">'
@@ -323,11 +323,11 @@ def metrics_block_html(cfg: dict) -> str:
         '<span class="settings-unit">小时</span>'
         '</div>'
         '<label class="check"><input type="checkbox" name="persist" value="1"{}> '
-        '服务重启后接着画</label>'
-        '<p class="settings-note">{} · 当前共 {} 个点</p>'
-        '<button type="submit" class="btn primary">保存</button>'
+        '服务重启后继续保留</label>'
+        '<p class="settings-note">{}</p>'
+        '<button type="submit" class="btn primary">保存设置</button>'
         '</form>'
-    ).format(hours, checked, where, st["points"])
+    ).format(hours, checked, kept)
 
 
 def cards_html(services: list[dict]) -> str:
