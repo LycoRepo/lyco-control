@@ -553,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'nonce-{}'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'".format(self._csp_nonce))
@@ -665,10 +665,10 @@ class Handler(BaseHTTPRequestHandler):
         form = self._body()
         if getattr(self, "_too_large", False):
             self.close_connection = True    # 残余 body 不能被当成下一个请求解析
-            return self._send(b"\xe6\x8f\x90\xe4\xba\xa4\xe5\x86\x85\xe5\xae\xb9\xe8\xbf\x87\xe5\xa4\xa7", 413, "text/plain",
+            return self._send(b"\xe6\x8f\x90\xe4\xba\xa4\xe5\x86\x85\xe5\xae\xb9\xe8\xbf\x87\xe5\xa4\xa7", 413, "text/plain; charset=utf-8",
                               extra=["Connection: close"])
         if not self._same_origin():
-            return self._send(b"\xe4\xb8\x8d\xe5\x85\x81\xe8\xae\xb8\xe8\xb7\xa8\xe7\xab\x99\xe6\x8f\x90\xe4\xba\xa4", 403, "text/plain")
+            return self._send(b"\xe4\xb8\x8d\xe5\x85\x81\xe8\xae\xb8\xe8\xb7\xa8\xe7\xab\x99\xe6\x8f\x90\xe4\xba\xa4", 403, "text/plain; charset=utf-8")
         if path == "/logout":
             return self._redirect("/login", extra=["Set-Cookie: " + self._cookie_header("", 0)])
         if path == "/setup":
@@ -879,8 +879,13 @@ class Handler(BaseHTTPRequestHandler):
         SameSite=Lax 只挡跨站，同父域下的兄弟子域仍算 same-site，所以这里再核一次主机。
         缺少来源头时拒绝；脚本调用也须显式提供本入口的 Origin。
         """
+        # 浏览器在 Referrer-Policy: no-referrer 下提交表单时会把 Origin 发成字符串 "null"，
+        # 这时只能看 Fetch Metadata：Sec-Fetch-Site 是浏览器自己打的，改不了。
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
         ref = self.headers.get("Origin") or self.headers.get("Referer") or ""
-        if not ref:
+        if ref.strip().lower() == "null" or not ref:
+            return site in ("same-origin", "none")
+        if site and site not in ("same-origin", "none"):
             return False
         try:
             origin = urlparse(ref)
@@ -945,8 +950,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _auth(self):
         if self._logged_in():
-            return self._send(b"ok", 200, "text/plain")
-        return self._send(b"no", 401, "text/plain")
+            return self._send(b"ok", 200, "text/plain; charset=utf-8")
+        return self._send(b"no", 401, "text/plain; charset=utf-8")
 
     def _api_status(self):
         if not self._logged_in():
@@ -958,7 +963,7 @@ class Handler(BaseHTTPRequestHandler):
     def _static(self, path: str):
         rel = unquote(path[len("/static/"):])
         if "\\" in rel or "\x00" in rel:
-            return self._send(b"400", 400, "text/plain")
+            return self._send(b"400", 400, "text/plain; charset=utf-8")
         root = os.path.realpath(STATIC_DIR)
         full = os.path.realpath(os.path.join(root, rel))
         try:
@@ -966,9 +971,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             inside = False
         if "\\" in rel or "\x00" in rel or not inside:
-            return self._send(b"\xe8\xaf\xb7\xe6\xb1\x82\xe6\x97\xa0\xe6\x95\x88", 400, "text/plain")
+            return self._send(b"\xe8\xaf\xb7\xe6\xb1\x82\xe6\x97\xa0\xe6\x95\x88", 400, "text/plain; charset=utf-8")
         if not os.path.isfile(full):
-            return self._send(b"\xe6\x96\x87\xe4\xbb\xb6\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8", 404, "text/plain")
+            return self._send(b"\xe6\x96\x87\xe4\xbb\xb6\xe4\xb8\x8d\xe5\xad\x98\xe5\x9c\xa8", 404, "text/plain; charset=utf-8")
         ext = os.path.splitext(full)[1].lower()
         ctype = {".css": "text/css", ".js": "application/javascript", ".svg": "image/svg+xml",
                  ".png": "image/png", ".ico": "image/x-icon"}.get(ext, "application/octet-stream")
@@ -976,7 +981,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(full, "rb") as fh:
                 body = fh.read()
         except OSError:
-            return self._send(b"404", 404, "text/plain")
+            return self._send(b"404", 404, "text/plain; charset=utf-8")
         return self._send(body, 200, ctype)
 
     def _save_services(self, form: dict):
