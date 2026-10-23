@@ -1076,8 +1076,12 @@ class Handler(BaseHTTPRequestHandler):
 class PortalServer(ThreadingHTTPServer):
     """限制活动连接数；慢连接和登录排队不能无限创建线程。"""
 
+    # 一次页面加载会并发打进来几十个 subrequest，每个都要过 /auth；
+    # 32 路并发 + 5 的 accept 队列会把多出来的连接直接掐掉，边缘侧表现为 502。
+    request_queue_size = 128
+
     def __init__(self, *args, **kwargs):
-        self._slots = threading.BoundedSemaphore(32)
+        self._slots = threading.BoundedSemaphore(128)
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):

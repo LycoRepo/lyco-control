@@ -201,7 +201,8 @@ sudo systemctl daemon-reload && sudo systemctl enable --now lyco-container-names
 - POST 严格校验来源防 CSRF，缺少来源头也拒绝；请求体上限 256 KB，拒绝重复长度头和 Transfer-Encoding。
 - 卡片字段做 HTML 转义；登录后的 `next` 只接受站内路径，`//evil.example` 这类会被丢弃。
 - 配置写入串行化，临时文件 + fsync + rename 原子替换，权限 600。
-- HTTP 活动连接最多 32 个，探活工作线程全局最多 8 个；认证读快照不等待配置写盘。
+- HTTP 活动连接最多 128 个（accept 队列同为 128），探活工作线程全局最多 8 个；认证读快照不等待配置写盘。
+  一个页面的并发 subrequest 有几十个、每个都要过 `/auth`，上限过低会把连接掐掉，边缘上表现为 502。
 - 动态 HTML 转义，静态路径验证真实目录边界；响应禁止缓存、嵌入框架和泄漏 Referer。
 
 本地自检（仅标准库）：
