@@ -115,6 +115,30 @@ sudo journalctl -u lyco-control --no-pager -n 30
 | `PORTAL_LOGIN_LOG` | 空 | 登录审计日志路径；记录成功/失败、IP、时间，超 1 MB 自动轮转 |
 | `PORTAL_METRICS_HOURS` | `24` | 资源曲线窗口长度（小时），仅默认模式生效 |
 | `PORTAL_METRICS_FILE` | `/run/lyco-portal/metrics-history.json` | 历史存放位置，想落磁盘才自己指到别处 |
+| `PORTAL_NOTIFY` | `1` | 登录事件推 QQ 的开关；`0`/`off`/`false` 关闭 |
+| `PORTAL_NOTIFY_URL` | `http://127.0.0.1:3019/notify` | 通知中继（`notifyd.py`）的本机地址 |
+
+`notifyd.py` 自己的环境变量（放 `notify.env`，已被 `.gitignore` 排除）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PORTAL_NOTIFY_TARGET` | 必填 | 接收通知的 QQ 号；不填则拒绝启动 |
+| `PORTAL_NOTIFY_TOKEN` | 空 | OneBot 网关的 access token |
+| `PORTAL_NOTIFY_WS` | `ws://127.0.0.1:3016` | 网关的反向 WS 地址（下游连网关，网关不主动拨号） |
+| `PORTAL_NOTIFY_LISTEN` | `127.0.0.1:3019` | 只绑本机的 HTTP 入口，供 `app.py` POST |
+
+### 登录通知（可选）
+
+`app.py` 在登录成功/失败时 `POST` 一段文本到 `PORTAL_NOTIFY_URL`，`notifyd.py` 把它转成 `send_private_msg`。中继连不上时只是没通知，登录流程不受影响；同一 IP 的失败提醒 5 分钟内只发一条。
+
+```bash
+python -m venv /srv/lyco-control/.venv          # 需要 websockets
+/srv/lyco-control/.venv/bin/pip install websockets
+sudo cp deploy/lyco-notify.service /etc/systemd/system/
+# 写 /srv/lyco-control/notify.env：PORTAL_NOTIFY_TARGET 与 PORTAL_NOTIFY_TOKEN
+sudo systemctl enable --now lyco-notify
+```
+
 
 ### `portal.json` 里的卡片
 
@@ -218,6 +242,7 @@ python -m unittest -v test_portal
 app.py                HTTP 服务：路由、认证、渲染
 metrics.py            /proc、statvfs、cgroup 采样
 service_status.py     systemd 状态与日志尾（只读）
+notifyd.py            登录事件转 QQ（可选，常驻连 OneBot 网关）
 templates/            index、login、setup、admin、detail
 static/               style.css 与站点图标
 deploy/               systemd 单元、nginx 示例、容器名定时器

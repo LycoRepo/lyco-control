@@ -1,0 +1,26 @@
+[Unit]
+Description=lyco-notify — relay Lyco Control login events to a QQ account over OneBot
+After=network-online.target
+Wants=network-online.target
+# 如果 OneBot 网关也在这台机上，加上它，避免开机时先连后起
+# After=onebot-policy-gateway.service
+
+[Service]
+Type=simple
+User=portal
+Group=portal
+WorkingDirectory=/srv/lyco-control
+# 敏感值放这里，不要写进 unit：PORTAL_NOTIFY_TOKEN / PORTAL_NOTIFY_TARGET 等
+EnvironmentFile=/srv/lyco-control/notify.env
+# 用带 websockets 的解释器；系统 python 可能没装
+ExecStart=/usr/bin/python3 /srv/lyco-control/notifyd.py
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

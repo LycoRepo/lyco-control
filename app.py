@@ -64,6 +64,15 @@ GLOBAL_FAILS: list[float] = []         # 失败时间戳（滑动窗口）
 GLOBAL_UNTIL = 0.0
 LOGIN_LOG = os.environ.get("PORTAL_LOGIN_LOG", "")   # 审计日志，空则只写 stdout
 LOGIN_SEM = threading.Semaphore(2)
+
+# 登录事件通知：POST 到本机的 lyco-notify 中继（见 notifyd.py）。
+# 中继或网关挂掉时只影响通知，登录流程一切照旧。
+NOTIFY_ENABLE = os.environ.get("PORTAL_NOTIFY", "1") not in ("0", "off", "false", "")
+NOTIFY_URL = os.environ.get("PORTAL_NOTIFY_URL", "http://127.0.0.1:3019/notify")
+NOTIFY_FAIL_GAP = 300                  # 同一个 IP 的失败提醒最短间隔（秒）
+NOTIFY_LAST: dict[str, float] = {}
+NOTIFY_LOCK = threading.Lock()
+
 AUDIT_LOCK = threading.Lock()     # 审计追加与轮转串行化
 PROBE_SEM = threading.BoundedSemaphore(8)
 TITLE = os.environ.get("PORTAL_TITLE", "服务入口")
@@ -850,6 +859,39 @@ class Handler(BaseHTTPRequestHandler):
                     GLOBAL_SLOW_UNTIL = now + GLOBAL_SLOW_FOR
                     GLOBAL_FAILS.clear()
         self._audit(ip, ok)
+        self._notify(ip, ok)
+
+    def _notify(self, ip: str, ok: bool) -> None:
+        """把登录结果推到 lyco-notify。同一 IP 的失败提醒 5 分钟内只发一条；任何异常都不影响登录。"""
+        if not NOTIFY_ENABLE:
+            return
+        try:
+            if not ok:
+                now = time.time()
+                with NOTIFY_LOCK:
+                    if now - NOTIFY_LAST.get(ip, 0.0) < NOTIFY_FAIL_GAP:
+                        return
+                    NOTIFY_LAST[ip] = now
+                    if len(NOTIFY_LAST) > 2048:
+                        for k in sorted(NOTIFY_LAST, key=lambda x: NOTIFY_LAST[x])[:1024]:
+                            NOTIFY_LAST.pop(k, None)
+            ua = "".join(ch for ch in (self.headers.get("User-Agent") or "?") if ch.isprintable())[:160]
+            text = "Lyco Control {}\n时间：{}\nIP：{}\nUA：{}".format(
+                "有新的登录" if ok else "登录失败",
+                time.strftime("%Y-%m-%d %H:%M:%S"), ip, ua)
+            threading.Thread(target=self._notify_post, args=(text,), daemon=True).start()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _notify_post(text: str) -> None:
+        try:
+            req = urllib.request.Request(NOTIFY_URL, data=text.encode("utf-8"),
+                                         headers={"Content-Type": "text/plain; charset=utf-8"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read(64)
+        except Exception:
+            pass
 
     def _audit(self, ip: str, ok: bool) -> None:
         """登录审计：谁、成没成。写文件失败不影响登录，但要留下痕迹。"""

@@ -4,6 +4,9 @@ portal.json.tmp
 .portal-*.tmp
 .metrics-*.tmp
 
+# 登录通知中继的凭据（网关 token、目标 QQ 号）
+notify.env
+
 # Python
 __pycache__/
 *.py[cod]
